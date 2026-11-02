@@ -1,0 +1,7 @@
+node_modules/
+dist/
+examples/*/dist/
+.vite/
+*.tgz
+bin/
+obj/

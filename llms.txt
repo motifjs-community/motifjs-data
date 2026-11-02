@@ -1,0 +1,349 @@
+# @motifx-community/data
+
+> A data layer with adapters for local arrays, REST, OData and WCF services. Version 0.1.0-beta.0: a preview, its API may still change before 1.0.
+
+`motifjs-data` is a data layer with adapters for local arrays, REST, OData and WCF services for **MotifJS** (`@motifx/core`), the fine-grained reactive UI framework without a virtual DOM.
+
+[Live demo](https://motifjs-community.github.io/motifjs-data/) · [Docs](https://motifjs.com/docs/data)
+
+The demo has one tab per use, each against a real service: 100,000 rows in memory, Northwind over
+OData, a lookup, a virtual list, DummyJSON over REST, editing TripPin's airlines with etags, and a local
+WCF service (`npm run wcf`). Run it with `npm run dev`.
+
+> **Preview** (`beta`): the adapters (`ArrayAdapter`, `RestAdapter`, `ODataAdapter` v4, `SoapAdapter` for WCF),
+> `DataSource` and `ChangeTracker` are in; the API may still change before 1.0.
+
+## Install
+
+```sh
+npm i @motifx/core@next @motifx-community/data@beta
+```
+
+Everything is in one object, `data`. It is an ES module namespace, so bundlers still leave out the
+parts you do not use, and types are read from it too (`data.LoadOptions`). Without a bundler, the UMD
+file puts the same object at `motif.data`, next to the core's `motif`:
+
+```html
+<script src="https://unpkg.com/@motifx/core/dist/index.umd.min.js"></script>
+<script src="https://unpkg.com/@motifx-community/data/dist/index.umd.js"></script>
+<script>
+  const orders = new motif.data.ODataAdapter({ url: 'https://host/odata/Orders', key: 'OrderID' });
+</script>
+```
+
+## 30 seconds
+
+```ts
+import { data } from '@motifx-community/data';
+
+const orders = new data.RestAdapter<Order, number>({
+  url: '/api/orders',
+  key: 'id',
+  headers: () => ({ Authorization: `Bearer ${session.token}` }),
+  timeoutMs: 15_000,
+  retry: { retries: 2 },
+});
+
+const page = await orders.load({
+  filter: data.and(data.where('city', '=', 'istanbul'), data.where('amount', '>=', 100)),
+  sort: [{ field: 'customer', dir: 'asc' }],
+  skip: 0,
+  take: 20,
+  count: true,
+});
+
+const saved = await orders.insert({ customer: 'Ada', amount: 5 });
+await orders.update(saved.id, { amount: 6 });
+await orders.remove(saved.id);
+```
+
+`ArrayAdapter` has the same API for rows in memory: `new data.ArrayAdapter({ data: rows, key: 'id' })`.
+It keeps your objects as they are: `insert(row)` puts that very object into the array and resolves to
+it (`===`), and a key from `createKey` is written onto it. Loads, `byKey`, `update`, `push` and the
+events hand back the same objects. Your rows may be plain or reactive; the adapter stores them as it
+gets them.
+
+## Concepts
+
+**One contract.** Every adapter has `load`, `count`, `byKey`, `insert`, `update`, `remove`, `save`
+(many changes, one outcome per change) and `push` (changes made elsewhere). `insert` resolves to the
+saved row: the backend's own object when it sends the whole row back, or else the object you gave, with
+what the backend sent (a new id, a version) written onto it.
+
+**What the backend cannot do runs in memory.** Turn off what an endpoint lacks with
+`capabilities: { filter: false }`; filtering, sorting, paging, counting or field selection then
+happen on the rows it returns. Text compares without case in the adapter's `locale`. Per field,
+`sortValue` (a computed value) and `compare` (an order of your own) change how memory sorts, and
+`filterValue` (a computed value) what memory filters by.
+
+**Groups and summaries.** `group: [{ field: 'country' }]` returns `groups` (levels, each with `key`,
+`count`, its rows or the level below, and the values of `groupSummary`) and `rows` in group order; with
+`skip` and `take` a page holds top-level groups. `summary: [{ type: 'sum', field: 'amount' }]` returns
+its values over every matching row (`count`, `sum`, `min`, `max`, `avg`). Values group the way filters
+compare them. A backend that cannot group or sum gets every matching row and the rest runs in memory.
+
+**Filters are plain data:** `data.where(field, op, value)` joined with `data.and`, `data.or`, `data.not`. Operators: `=`
+`<>` `<` `<=` `>` `>=` `contains` `notcontains` `startswith` `endswith` `between` `in` `notin`
+`isblank` `isnotblank`. `data.none()` is a filter no row passes.
+
+**Events.** `onLoading`, `onInserting`, `onUpdating`, `onRemoving` come before the backend is called;
+listeners can change what is sent or set `cancel = true`. `onInserting` gets the object given to
+`insert` itself as `values`, `onUpdating` the given changes. `onLoaded`, `onInserted`, `onUpdated`,
+`onRemoved`, `onChanged`, `onError` come after. They are `@motifx/core` events: subscribing returns
+an `IDisposable`.
+
+```ts
+this.motif.register(orders.onChanged(({ changes }) => list.apply(changes)));
+```
+
+**Every request can be changed.** `HttpAdapter` (the base of REST, OData and SOAP adapters) takes:
+
+| Option / event | |
+| --- | --- |
+| `fetch` | Your own `fetch` (a wrapped one, a test double) |
+| `headers` | Fixed, or a function called for every request |
+| `beforeSend(request)` | Async; change `url`, `query`, `headers`, `data`, `body`, or set `cancel` |
+| `onRequesting` | The same, for listeners |
+| `afterReceive(response)` | Change `status` or `body` (unwrap an envelope), or throw |
+| `onResponded` | Every answer, with `durationMs` |
+| `timeoutMs`, `retry` | Core `Resilience`; only transient failures (no answer, 408, 429, 5xx) are retried |
+| `resilience` | A whole core policy (circuit breaker, bulkhead, rate limiter …) |
+| `readError(response)` | Reads an error answer in the backend's own format; return nothing for the built-in reader |
+| `errorTextLength` | An error answer that is plain text becomes the message up to this many characters. Default 300 |
+
+**Errors are `MotifError`s with codes.** Every operation fails with a `DataError`:
+`[motifjs-data] MJD202: Must be positive`. `code` is stable, `kind` is the category to react to,
+`plainMessage` is the text without the prefix, `fields` holds messages by field.
+
+| Code | Kind | |
+| --- | --- | --- |
+| `MJD101`–`MJD109` | `network`, `timeout`, `http`, `parse`, `abort`, `held` | The request |
+| `MJD201`–`MJD205` | `server`, `validation`, `conflict`, `not-found` | The backend's answer |
+| `MJD301`–`MJD305` | `unsupported`, `invalid`, `key` | How the adapter was used |
+
+## DataSource
+
+The rows a component shows: a grid, a combo box, a lookup. It loads through any adapter and keeps
+the query.
+
+```ts
+const customers = new data.DataSource({
+  adapter: new data.ODataAdapter({ url: '/odata/Customers', key: 'CustomerID' }),
+  loadMode: 'page',
+  pageSize: 20,
+  searchFields: ['CompanyName', 'ContactName'],
+  sort: [{ field: 'CompanyName', dir: 'asc' }],
+  summary: [{ type: 'count' }],
+});
+this.motif.register(customers.onChanged(({ reason }) => list.refresh(reason)));
+
+await customers.search('mar');
+await customers.setPage(1);
+const selected = await customers.byKey('WOLZA');
+```
+
+| `loadMode` | | Read with |
+| --- | --- | --- |
+| `'all'` | every row at once (small lists, `ArrayAdapter`) | `rows`, `rowAt(i)` |
+| `'page'` | one page at a time; `setPage`, `pageCount`, `isLastPage` | `rows`, `rowAt(i)`, `loadedPageIndex` |
+| `'blocks'` | blocks of `pageSize` where a virtual list looks: `ensure(first, end)` | `rowAt(i)`, `total` |
+
+In `'blocks'`, a jump (a scroll bar drag) loads only where it stops (`scrollStopMs`), blocks left behind
+while loading are aborted, at most `cacheBlocks` stay in memory, and `pin(i)` keeps the focused row's
+block.
+
+| `'blocks'` option | Default | |
+| --- | --- | --- |
+| `pageSize` | 50 | Rows per block (`'page'`: per page, default 20) |
+| `cacheBlocks` | 40 | Blocks kept in memory (at least 4); the ones used longest ago go first |
+| `scrollStopMs` | 120 | After a jump, the wait without movement before loading |
+| `jumpRows` | `pageSize` | A move of more rows than this is a jump |
+| `nearBlocks` | 1 | Blocks this many away from the view keep loading when it moves, and stay in the cache |
+ `setFilter`, `setSort`, `search` (over `searchFields`, with `searchOperator`) and `setQuery` start
+again from the first row; `reload()` keeps the page or the view. `status` is `'loading'` until the
+first rows arrive; in `'all'` the old rows stay until then (`keepRowsWhileLoading: false` drops them at
+once). While another page loads, `rows` and `rowAt` keep the page of `loadedPageIndex` at its own
+indexes (`pageIndex` is the page asked for).
+
+`group`, `groupSummary` and `summary` work as in a load: `groups`, `groupCount` and `summary` hold the
+result (`setGroup` changes the levels). A grouped page holds top-level groups, and `rows` every row of
+them. In `'page'` and `'blocks'` the summary loads apart, once per query, so turning pages does not
+ask for it again; in `'all'` it follows every change of the rows. `'blocks'` does not group.
+
+For a view that needs other values than the source's own, `loadGroups(group, { groupSummary })` gives
+the groups of the current query with their counts and those summaries, without rows, and
+`loadSummary(items)` the summary values of the current query over every matching row; neither touches
+the rows the source holds. An item's `skipEmpty: false` counts empty values as 0 in `sum` and `avg`
+(memory only), and the evaluate context's `summaryValue` reads a field through a function.
+
+When the adapter cannot do all of a `'page'` query (it cannot filter, sort, group or sum the way it is
+asked), the matching rows would come whole anyway: they load once per row set (filter, search,
+`params`) and are kept. Summaries, groups and then every page come from them, so turning pages, sorting
+and grouping send no request until the row set changes or `reload()`. An ungrouped first page loads
+apart so it does not wait for them. Saved and pushed changes go into the kept rows.
+
+`byKey` looks among the loaded rows and earlier lookups before it asks the adapter, so a combo box can
+show its value when that row is on no loaded page. Changes saved through the adapter, or announced with
+`push`, reach the loaded rows: updates in place, new and removed rows in `'all'` (in the query's order),
+the total in `'page'`; in `'blocks'` the blocks load again.
+
+Every change is told through `onChanged`: `query`, `reload`, `loading`, `loaded`, `failed`, `cleared`, `rows`, `summary`. Loads never
+reject; a failure sets `status` to `'error'` and `error`, and `retry()` loads again.
+
+`loadRange({ skip, take, filter, count, signal })` reads a part of the current query (filter, search,
+sort, `params`; `filter` narrows it) without touching the rows the source holds, for an export or a
+print that goes through every page. It rejects when the load fails.
+
+## ChangeTracker
+
+Unsaved edits, new rows and deletions over a `DataSource`, for components that edit (a grid, a form
+over a list). Edits are kept by row key, so they survive paging, sorting and scrolling; the row object
+changes only when the row is saved.
+
+```ts
+const changes = new data.ChangeTracker({
+  source: orders,
+  saveMode: 'wait',
+  createRow: () => ({ amount: 0 }),
+  validateField: (field, value) => (field === 'amount' && Number(value) < 0 ? 'Must not be negative' : null),
+  validateRow: (row, { isNew, getValue }) => (isNew && !getValue('customer') ? { customer: 'Required' } : null),
+});
+
+changes.setValue(row, 'amount', 12);   // shown with changes.getValue(row, 'amount')
+await changes.commit(row);             // the user left the row
+const added = changes.add({ customer: 'Ada' });
+```
+
+A new row is the tracker's own object, the one in `newRows`. When it is saved, the entered values are
+written onto it and that same object is sent, so an `ArrayAdapter` keeps it in its array. A new row
+whose save failed stays, with its values, until it is saved or discarded.
+
+| `saveMode` | A row is saved |
+| --- | --- |
+| `'wait'` | when the user leaves it (`commit`); the caller waits for the answer |
+| `'background'` | the same, through one queue, without waiting |
+| `'batch'` | only on `saveChanges()`: deletions, updates, then new rows, through the adapter's `save` |
+
+Updates send only the changed fields, with the row itself as it was read (`original`), so an OData etag or a
+WCF version goes with them. `statusOf(row)` tells `new`, `changed`, `removed`, `saving`, `failed` or
+`invalid`; `errorsOf(row)` holds messages by field (`''` for the whole row), from the checks and from
+a failed save (`DataError.fields`). The checks get the row itself, which keeps its values until it is
+saved, and the entered values apart: `validateField(field, value, { row, values, isNew, getValue })`
+and `validateRow(row, { values, isNew, changed, getValue })`. `values` holds the entered values by
+field, `getValue(field)` the value a field is saved with. A row with a message is not sent. `editOf(row)` (or `editById(id)`) gives all of it to read: `isNew`, `removed`, `saving`,
+`failed`, `draft` (the changed values), `errors`. `remove`, `restore`, `discard`, `discardChanges` and
+`changes()` cover the rest; `pendingRows()` lists the rows with something to save. `removeRows(rows)`
+(or `removeKeys(keys)`) deletes several rows in one save: `'batch'` marks them, `'wait'` and
+`'background'` send them together, in one request when the adapter saves in batches (OData `$batch`,
+a REST batch endpoint, a SOAP `save` operation), else one request per row. New rows are in
+`newRows` until they are saved and the source has them among its rows, or a new query starts; with
+`keepSavedNewRows: true` saved ones stay until the source's `reload()`. Every change is told through
+`onChanged`.
+
+| Option / event | Default | |
+| --- | --- | --- |
+| `saveOrder` | `['remove', 'update', 'insert']` | The order `saveChanges()` sends the changes in |
+| `sameValue(a, b, field)` | empty values are the same, dates by moment, else `Object.is` | Whether an entered value is the one the row has (no change) |
+| `onSaving` | — | Rows are about to be sent: change a change's `data`, `skip(row)` keeps one back (its edits stay), `cancel` keeps all. A row kept back in `'wait'` makes `commit` resolve `false` |
+| `onSaved` | — | The answer came: `changes`, `rows` and the `outcomes`, in the order sent |
+
+
+## RestAdapter
+
+`GET url` loads (`skip`, `take`, `count`, `sort=name,-date`, `filter` as JSON), `GET url/key` finds,
+`POST url` inserts, `PATCH url/key` updates, `DELETE url/key` removes. Change any of it with
+`itemUrl`, `updateMethod`, `loadQuery`, `readRows` (it also gets the response, for a total in a
+header), `readSaved`; give `batch` for an endpoint that takes many changes in one request.
+
+## ODataAdapter
+
+```ts
+const orders = new data.ODataAdapter<Order, number>({
+  url: 'https://host/odata/Orders',
+  key: 'OrderID',
+  fields: { OrderDate: 'datetime', ShipDate: 'date', RowGuid: 'guid' },
+  batch: true,
+});
+
+const page = await orders.load({
+  filter: data.where('ShipCity', 'contains', 'ber'),
+  sort: [{ field: 'OrderDate', dir: 'desc' }],
+  take: 50,
+  count: true,
+  expand: ['Customer', 'Lines.Product'],
+});
+await orders.update(row.OrderID, { Freight: 12 }, { original: row });
+```
+
+Filters, sorting, paging, counting, `$select` and `$expand` (`Lines.Product` becomes
+`Lines($expand=Product)`) run on the service. The `$filter` keeps the rows memory keeps: text without
+case through `tolower()`, an empty text value filters nothing out, `<>` and `notin` keep empty values,
+`isblank` is `null` or (for declared text) empty or spaces. `fields` sets the literals: `date` is
+`2024-03-05`, `datetime` an ISO moment, `guid` has no quotes. `toODataFilter` gives the same text for
+your own requests.
+
+With `aggregation: true` (a service with `$apply`), summaries are computed there:
+`$apply=filter(…)/aggregate(Freight with sum as s0,$count as s1)`; without it they run in memory.
+
+Reads send no custom header, so a browser sends them without a CORS preflight; `OData-Version` and
+`OData-MaxVersion` go with writes. When the service answers in pages, `@odata.nextLink` is followed until
+the rows asked for are there.
+`update` and `remove` send the `@odata.etag` of `original` as `If-Match`: a row changed elsewhere fails
+with `MJD205`, a service that needs the version and did not get it with `MJD305`. Saved rows come back
+with `Prefer: return=representation` (`returnSavedRow: false` turns it off). `batch` sends `save` as
+one `$batch` request; `batch: { allOrNothing: true }` puts the changes in one change set.
+
+## SoapAdapter
+
+```ts
+const orders = new data.SoapAdapter<Order, number>({
+  url: 'https://host/OrderService.svc',
+  contract: 'IOrderService',
+  dataNamespace: 'http://schemas.datacontract.org/2004/07/Shop',
+  key: 'Id',
+  fields: { Id: 'number', Amount: 'number', Shipped: 'boolean', 'Lines.Quantity': 'number' },
+  firstFields: ['Id', 'Version'],
+  lists: { Lines: 'OrderLine', Tags: 'string' },
+  operations: {
+    load: { name: 'GetAllOrders' },
+    byKey: { name: 'GetOrder', args: (id) => ({ id }) },
+    insert: { name: 'AddOrder', args: (order) => ({ order }) },
+    update: { name: 'UpdateOrder', args: (id, changes, original) => ({ order: { ...original, ...changes } }) },
+    remove: { name: 'DeleteOrder', args: (id) => ({ id }) },
+  },
+});
+```
+
+SOAP has no query language: each part of the contract calls the operation you name, with the
+arguments `args` returns, in the operation's parameter order. What `load` does not list in `handles`
+(`filter`, `sort`, `paging`, `count`, `select`) runs in memory; with `handles: ['paging', 'sort', 'count']`
+the operation gets `skip`, `take` and `sort`, and its `read` returns `{ rows, total }`. A `save`
+operation sends many changes in one call.
+
+Objects are written the way WCF's `DataContractSerializer` reads them: fields in `dataNamespace`, in
+alphabetical order, the fields of a base class first (`firstFields`). WCF skips a field that is out of
+order without an error. `lists` gives the item names of lists: writing a list needs it, and reading uses
+it so that a list of one item stays a list. Use `serializer: 'xml'` for ASMX and XmlSerializer services.
+XML is text, so declared `number` and `boolean` fields are converted.
+
+SOAP 1.1 (`basicHttpBinding`) is the default; `version: '1.2'` with `addressing: true` is for
+`wsHttpBinding` without security. `soapHeader` adds XML to the header, such as a token. A fault becomes
+`MJD202` (`Client` / `Sender`) or `MJD201`, unless `readFault` returns another error from the fault's
+code, message and detail.
+
+## Writing an adapter
+
+Extend `DataAdapter` (or `HttpAdapter` for HTTP backends) and implement `backendCapabilities`,
+`loadRows`, and the writes you support: `insertRow`, `updateRow`, `removeRow`, optionally
+`saveBatch`. `insertRow` gets the caller's object itself: send it, and store it as it is when the
+backend keeps objects.
+
+## Contributing
+
+`npm install`, then `npm run check`. `npm run test:live` runs the adapters against public demo services
+(OData Northwind and TripPin, DummyJSON, JSONPlaceholder, CountryInfo) and a WCF service it builds from
+`tests/live/wcf-service` (CoreWCF; needs the .NET 9 SDK, skipped without it). See [AGENTS.md](AGENTS.md).
+
+## License
+
+[MIT](LICENSE)

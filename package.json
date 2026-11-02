@@ -1,0 +1,78 @@
+{
+  "name": "@motifx-community/data",
+  "version": "0.1.0-beta.0",
+  "description": "A data layer with adapters for local arrays, REST, OData and WCF services",
+  "keywords": [
+    "motifjs",
+    "motifx",
+    "motif",
+    "data",
+    "datasource",
+    "adapter",
+    "rest",
+    "odata",
+    "wcf",
+    "soap"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/motifjs-community/motifjs-data"
+  },
+  "homepage": "https://motifjs.com/docs/data",
+  "bugs": {
+    "url": "https://github.com/motifjs-community/motifjs-data/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "types": "./dist/index.d.ts",
+  "unpkg": "./dist/index.umd.js",
+  "jsdelivr": "./dist/index.umd.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "llms.txt",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "vite examples/basic",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "example:build": "vite build examples/basic",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "vitest run --config vitest.live.config.ts",
+    "wcf": "dotnet run --project tests/live/wcf-service -c Release",
+    "typecheck": "tsc --noEmit",
+    "lint:jsx": "motif-lint",
+    "check": "npm run typecheck && npm run lint:jsx && npm test && npm run build && npm run example:build",
+    "prepublishOnly": "npm run check"
+  },
+  "peerDependencies": {
+    "@motifx/core": "^1.2.0-rc.21"
+  },
+  "devDependencies": {
+    "@motifx-community/design-system": "file:../motifjs-design-system",
+    "@motifx/compiler": "1.2.0-rc.21",
+    "@motifx/core": "1.2.0-rc.21",
+    "@types/node": "^24.19.1",
+    "jsdom": "^30.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  }
+}

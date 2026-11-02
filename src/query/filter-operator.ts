@@ -1,0 +1,16 @@
+export type FilterOperator =
+  | '='
+  | '<>'
+  | '<'
+  | '<='
+  | '>'
+  | '>='
+  | 'contains'
+  | 'notcontains'
+  | 'startswith'
+  | 'endswith'
+  | 'between'
+  | 'in'
+  | 'notin'
+  | 'isblank'
+  | 'isnotblank';
