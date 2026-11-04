@@ -1,0 +1,56 @@
+name: Demo
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+# The demo draws with the design system, a dependency by path until it is published (see ci.yml).
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: motifjs-data
+      - uses: actions/checkout@v4
+        with:
+          repository: motifjs-community/motifjs-design-system
+          path: motifjs-design-system
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            motifjs-data/package-lock.json
+            motifjs-design-system/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: motifjs-design-system
+      - run: npm ci
+        working-directory: motifjs-data
+      - run: npm run build
+        working-directory: motifjs-data
+      - run: npm run example:build
+        working-directory: motifjs-data
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: motifjs-data/examples/basic/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

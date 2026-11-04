@@ -1,8 +1,12 @@
 # motifjs-data
 
-`motifjs-data` is a data layer with adapters for local arrays, REST, OData and WCF services for **MotifJS** (`@motifx/core`), the fine-grained reactive UI framework without a virtual DOM.
+[![npm](https://img.shields.io/npm/v/@motifx-community/data/beta?label=npm%20%40beta)](https://www.npmjs.com/package/@motifx-community/data)
+[![CI](https://github.com/motifjs-community/motifjs-data/actions/workflows/ci.yml/badge.svg)](https://github.com/motifjs-community/motifjs-data/actions/workflows/ci.yml)
+[![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-[Live demo](https://motifjs-community.github.io/motifjs-data/) · [Docs](https://motifjs.com/docs/data)
+`motifjs-data` is a data layer with adapters for local arrays, REST, OData and WCF services for **MotifJS** (`@motifx/core`), the UI framework whose view is a live object tree, not a description of one.
+
+[Live demo](https://motifjs-community.github.io/motifjs-data/)
 
 The demo has one tab per use, each against a real service: 100,000 rows in memory, Northwind over
 OData, a lookup, a virtual list, DummyJSON over REST, editing TripPin's airlines with etags, and a local
@@ -340,7 +344,8 @@ backend keeps objects.
 
 `npm install`, then `npm run check`. `npm run test:live` runs the adapters against public demo services
 (OData Northwind and TripPin, DummyJSON, JSONPlaceholder, CountryInfo) and a WCF service it builds from
-`tests/live/wcf-service` (CoreWCF; needs the .NET 9 SDK, skipped without it). See [AGENTS.md](AGENTS.md).
+`tests/live/wcf-service` (CoreWCF; needs the .NET 9 SDK, skipped without it). The setup, the checks and the rules
+a change follows are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The design system is a dependency by path (file:../motifjs-design-system) until it is published: both
+# repositories are checked out side by side and the design system is built first.
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: motifjs-data
+      - uses: actions/checkout@v4
+        with:
+          repository: motifjs-community/motifjs-design-system
+          path: motifjs-design-system
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: |
+            motifjs-data/package-lock.json
+            motifjs-design-system/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: motifjs-design-system
+      - run: npm ci
+        working-directory: motifjs-data
+      - run: npm run check
+        working-directory: motifjs-data
+      - name: Package contents
+        run: npm pack --dry-run
+        working-directory: motifjs-data
