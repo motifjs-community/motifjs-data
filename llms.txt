@@ -342,7 +342,7 @@ backend keeps objects.
 
 `npm install`, then `npm run check`. `npm run test:live` runs the adapters against public demo services
 (OData Northwind and TripPin, DummyJSON, JSONPlaceholder, CountryInfo) and a WCF service it builds from
-`tests/live/wcf-service` (CoreWCF; needs the .NET 9 SDK, skipped without it). See [AGENTS.md](AGENTS.md).
+`tests/live/wcf-service` (CoreWCF; needs the .NET 9 SDK, skipped without it).
 
 ## License
 
