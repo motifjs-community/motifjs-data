@@ -21,7 +21,7 @@ export function toODataFilter(filter: FilterExpression, options: ODataFilterOpti
 }
 
 function write(e: FilterExpression, o: ODataFilterOptions, nested: boolean): Part {
-  if (isCondition(e)) return condition(e, o);
+  if (isCondition(e)) return o.collections?.includes(e.field) ? listCondition(e, o) : condition(e, o, odataPath(e.field));
   if ('not' in e) {
     const inner = write(e.not, o, true);
     return typeof inner === 'boolean' ? !inner : `not ${inner.startsWith('(') ? inner : `(${inner})`}`;
@@ -37,11 +37,33 @@ function write(e: FilterExpression, o: ODataFilterOptions, nested: boolean): Par
   return nested ? `(${text.join(` ${op} `)})` : text.join(` ${op} `);
 }
 
-function condition(c: FilterCondition, o: ODataFilterOptions): Part {
+const TEXT_OPS = new Set<FilterCondition['op']>(['contains', 'notcontains', 'startswith', 'endswith']);
+// The positive form of a negative operator: a list keeps a row when none of its values passes it.
+const POSITIVE: Partial<Record<FilterCondition['op'], FilterCondition['op']>> = { '<>': '=', notin: 'in', notcontains: 'contains' };
+
+/**
+ * A condition on a collection (a list of values): it holds when one of the values passes it, with a negative operator
+ * when none does; a list is blank when none of its values is not blank, an empty list too.
+ */
+function listCondition(c: FilterCondition, o: ODataFilterOptions): Part {
   const path = odataPath(c.field);
+  const any = (inner: Part): Part => (inner === false ? false : inner === true ? `${path}/any()` : `${path}/any(x: ${inner})`);
+  const not = (p: Part): Part => (typeof p === 'boolean' ? !p : `not ${p}`);
+  if (c.op === 'isblank' || c.op === 'isnotblank' || ((c.op === '=' || c.op === '<>') && isEmpty(c.value))) {
+    const filled = any(condition({ ...c, op: 'isnotblank' }, o, 'x'));
+    return c.op === 'isnotblank' || c.op === '<>' ? filled : not(filled);
+  }
+  // An empty text value filters nothing out, like an empty filter box.
+  if (TEXT_OPS.has(c.op) && isEmpty(c.value)) return true;
+  const positive = POSITIVE[c.op];
+  const found = any(condition(positive ? { ...c, op: positive } : c, o, 'x'));
+  return positive ? not(found) : found;
+}
+
+function condition(c: FilterCondition, o: ODataFilterOptions, path: string): Part {
   const declared = o.fields?.[c.field];
   const sample = Array.isArray(c.value) ? c.value.find((v) => !isEmpty(v)) : c.value;
-  const textOp = c.op === 'contains' || c.op === 'notcontains' || c.op === 'startswith' || c.op === 'endswith';
+  const textOp = TEXT_OPS.has(c.op);
   const type = textOp ? 'string' : (declared ?? fieldTypeOf(sample));
   const lower = type === 'string' && o.ignoreCase !== false && !c.caseSensitive;
   const field = lower ? `tolower(${path})` : path;

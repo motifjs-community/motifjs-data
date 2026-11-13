@@ -27,75 +27,116 @@ function buildTest(e: FilterExpression, ctx: EvaluateContext): (row: unknown) =>
   return (row) => !inner(row);
 }
 
+interface ValueTest {
+  one: (v: unknown) => boolean;
+  none: boolean;
+}
+
 function conditionTest(c: FilterCondition, ctx: EvaluateContext): (row: unknown) => boolean {
-  const sample = Array.isArray(c.value) ? c.value.find((v) => !isEmpty(v)) : c.value;
-  const cmp = new ValueComparer(ctx.fields?.[c.field] ?? fieldTypeOf(sample), ctx.locale, !!c.caseSensitive);
   const value = valueReader(c.field, ctx);
-  const read = (row: unknown) => cmp.toComparable(value(row));
-  const blank = (row: unknown) => isBlank(value(row));
+  // An empty field, an empty list of values too: `isblank`, and `=` / `<>` with an empty value.
+  const askedEmpty = (c.op === '=' || c.op === '<>') && comparerOf(c, ctx).toComparable(c.value) === null;
+  if (c.op === 'isblank' || c.op === 'isnotblank' || askedEmpty) {
+    const blank = (row: unknown) => blankValue(value(row));
+    return c.op === 'isblank' || c.op === '=' ? blank : (row) => !blank(row);
+  }
+  const test = valueTest(c, ctx);
+  if (!test) return () => true;
+  const { one, none } = test;
+  // A field that holds several values (an array) matches when one of them does; with a negative operator (`<>`,
+  // `notin`, `notcontains`), when none of them does.
+  return (row) => {
+    const v = value(row);
+    const found = Array.isArray(v) ? v.some(one) : one(v);
+    return none ? !found : found;
+  };
+}
+
+/**
+ * The test of one value against the condition, in its positive form (`=`, `in`, `contains`), and whether the operator
+ * is the negative one; `null` when the condition keeps every row.
+ */
+function valueTest(c: FilterCondition, ctx: EvaluateContext): ValueTest | null {
+  const cmp = comparerOf(c, ctx);
+  const read = (v: unknown) => cmp.toComparable(v);
 
   switch (c.op) {
-    case 'isblank':
-      return blank;
-    case 'isnotblank':
-      return (row) => !blank(row);
     case '=':
     case '<>': {
       const target = cmp.toComparable(c.value);
-      const equal = (row: unknown) => (target === null ? blank(row) : cmp.equals(read(row), target));
-      return c.op === '=' ? equal : (row) => !equal(row);
+      return { one: (v) => cmp.equals(read(v), target), none: c.op === '<>' };
     }
     case '<':
     case '<=':
     case '>':
     case '>=': {
       const target = cmp.toComparable(c.value);
-      if (target === null) return () => false;
+      if (target === null) return { one: () => false, none: false };
       const accept = { '<': (n: number) => n < 0, '<=': (n: number) => n <= 0, '>': (n: number) => n > 0, '>=': (n: number) => n >= 0 }[c.op];
-      return (row) => {
-        const v = read(row);
-        return v !== null && accept(cmp.compare(v, target));
+      return {
+        one: (v) => {
+          const x = read(v);
+          return x !== null && accept(cmp.compare(x, target));
+        },
+        none: false,
       };
     }
     case 'between': {
       const [from, to] = (c.value as unknown[]).map((v) => cmp.toComparable(v));
-      return (row) => {
-        const v = read(row);
-        return v !== null && (from === null || cmp.compare(v, from) >= 0) && (to === null || cmp.compare(v, to) <= 0);
+      return {
+        one: (v) => {
+          const x = read(v);
+          return x !== null && (from === null || cmp.compare(x, from) >= 0) && (to === null || cmp.compare(x, to) <= 0);
+        },
+        none: false,
       };
     }
     case 'in':
     case 'notin': {
       const targets = (c.value as unknown[]).map((v) => cmp.toComparable(v));
-      const found = (row: unknown) => {
-        const v = read(row);
-        return targets.some((t) => (t === null ? v === null : cmp.equals(v, t)));
+      return {
+        one: (v) => {
+          const x = read(v);
+          return targets.some((t) => (t === null ? x === null : cmp.equals(x, t)));
+        },
+        none: c.op === 'notin',
       };
-      return c.op === 'in' ? found : (row) => !found(row);
     }
     default:
       return textTest(c, ctx);
   }
 }
 
-function textTest(c: FilterCondition, ctx: EvaluateContext): (row: unknown) => boolean {
+/** How the condition's field compares: its declared type, else the type of the condition's value. */
+function comparerOf(c: FilterCondition, ctx: EvaluateContext): ValueComparer {
+  const sample = Array.isArray(c.value) ? c.value.find((v) => !isEmpty(v)) : c.value;
+  return new ValueComparer(ctx.fields?.[c.field] ?? fieldTypeOf(sample), ctx.locale, !!c.caseSensitive);
+}
+
+function textTest(c: FilterCondition, ctx: EvaluateContext): ValueTest | null {
   const text = new ValueComparer('string', ctx.locale, !!c.caseSensitive);
   const target = text.toComparable(c.value) as string | null;
   // An empty value filters nothing out, like an empty filter box.
-  if (target === null) return () => true;
+  if (target === null) return null;
   const matches =
     c.op === 'startswith' ? (s: string) => s.startsWith(target) : c.op === 'endswith' ? (s: string) => s.endsWith(target) : (s: string) => s.includes(target);
-  const value = valueReader(c.field, ctx);
-  const found = (row: unknown) => {
-    const s = text.toComparable(value(row)) as string | null;
-    return s !== null && matches(s);
+  return {
+    one: (v) => {
+      const s = text.toComparable(v) as string | null;
+      return s !== null && matches(s);
+    },
+    none: c.op === 'notcontains',
   };
-  return c.op === 'notcontains' ? (row) => !found(row) : found;
 }
 
 // The context's `filterValue` of the field, else the field itself.
 function valueReader(field: string, ctx: EvaluateContext): (row: unknown) => unknown {
   return ctx.filterValue?.(field) ?? ((row) => getField(row, field));
+}
+
+/** An empty field: a blank value, or a list of values with none that is not blank (an empty one too). */
+function blankValue(v: unknown): boolean {
+  return Array.isArray(v) ? v.every(isBlank) : isBlank(v);
 }
 
 /** `null`, `undefined`, `NaN` and text of only spaces. */

@@ -70,6 +70,36 @@ describe('filter', () => {
     expect(() => createRowFilter({ and: [{ nope: 1 }] } as never)).toThrow(/filter.and\[0\]/);
   });
 
+  it('matches a list of values when one of them does; with a negative operator when none does', () => {
+    const lists = [
+      { id: 1, tags: ['Kırmızı', 'Mavi'], sizes: [36, 40] },
+      { id: 2, tags: ['mavi'], sizes: [44] },
+      { id: 3, tags: [], sizes: [] },
+      { id: 4, tags: null, sizes: null },
+      { id: 5, tags: ['', ' '], sizes: [null] },
+    ];
+    const pick = (f: data.FilterExpression) => lists.filter(createRowFilter(f, { locale: 'tr' })).map((r) => r.id);
+    expect(pick(where('tags', '=', 'MAVİ'))).toEqual([1, 2]);
+    expect(pick(where('tags', '<>', 'mavi'))).toEqual([3, 4, 5]);
+    expect(pick(where('tags', 'in', ['kırmızı', 'yeşil']))).toEqual([1]);
+    expect(pick(where('tags', 'notin', ['kırmızı', 'yeşil']))).toEqual([2, 3, 4, 5]);
+    expect(pick(where('tags', 'contains', 'av'))).toEqual([1, 2]);
+    expect(pick(where('tags', 'notcontains', 'kır'))).toEqual([2, 3, 4, 5]);
+    expect(pick(where('tags', 'startswith', 'k'))).toEqual([1]);
+    expect(pick(where('sizes', '>', 40))).toEqual([2]);
+    expect(pick(where('sizes', '<=', 36))).toEqual([1]);
+    expect(pick(where('sizes', 'between', [38, 42]))).toEqual([1]);
+    expect(pick(where('sizes', 'between', [null, null]))).toEqual([1, 2]);
+    // A list with no value that is not blank is blank, an empty one too.
+    expect(pick(where('tags', 'isblank'))).toEqual([3, 4, 5]);
+    expect(pick(where('tags', 'isnotblank'))).toEqual([1, 2]);
+    expect(pick(where('sizes', '=', null))).toEqual([3, 4, 5]);
+    expect(pick(where('sizes', '<>', null))).toEqual([1, 2]);
+    // An empty text value filters nothing out, empty lists included.
+    expect(pick(where('tags', 'contains', ''))).toEqual([1, 2, 3, 4, 5]);
+    expect(pick(not(where('tags', '=', 'mavi'))!)).toEqual([3, 4, 5]);
+  });
+
   it('tells a filter expression from other values', () => {
     expect(data.isFilterExpression(where('id', '<', 3))).toBe(true);
     expect(data.isFilterExpression(or(where('id', '<', 3), not(where('city', 'isblank'))))).toBe(true);

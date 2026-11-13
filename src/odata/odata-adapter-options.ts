@@ -10,6 +10,8 @@ export interface ODataAdapterOptions<T, K> extends HttpAdapterOptions<T> {
   updateMethod?: 'PATCH' | 'PUT';
   /** Text filters compare without case through `tolower()`. Default `true`. */
   ignoreCase?: boolean;
+  /** Fields that hold a list of values (collections, such as `Tags`): filters on them are written with `any()`. */
+  collections?: readonly string[];
   /** Asks for the saved row back (`Prefer: return=representation`). Default `true`. */
   returnSavedRow?: boolean;
   /** Loads the following pages when the service answers in pages (`@odata.nextLink`). Default `true`. */

@@ -86,7 +86,9 @@ compare them. A backend that cannot group or sum gets every matching row and the
 
 **Filters are plain data:** `data.where(field, op, value)` joined with `data.and`, `data.or`, `data.not`. Operators: `=`
 `<>` `<` `<=` `>` `>=` `contains` `notcontains` `startswith` `endswith` `between` `in` `notin`
-`isblank` `isnotblank`. `data.none()` is a filter no row passes.
+`isblank` `isnotblank`. `data.none()` is a filter no row passes. A field that holds a list of values
+(an array) passes when one of its values does; with `<>`, `notin` and `notcontains`, when none does. A
+list with no value that is not blank is blank, an empty list too.
 
 **Events.** `onLoading`, `onInserting`, `onUpdating`, `onRemoving` come before the backend is called;
 listeners can change what is sent or set `cancel = true`. `onInserting` gets the object given to
@@ -281,8 +283,10 @@ Filters, sorting, paging, counting, `$select` and `$expand` (`Lines.Product` bec
 `Lines($expand=Product)`) run on the service. The `$filter` keeps the rows memory keeps: text without
 case through `tolower()`, an empty text value filters nothing out, `<>` and `notin` keep empty values,
 `isblank` is `null` or (for declared text) empty or spaces. `fields` sets the literals: `date` is
-`2024-03-05`, `datetime` an ISO moment, `guid` has no quotes. `toODataFilter` gives the same text for
-your own requests.
+`2024-03-05`, `datetime` an ISO moment, `guid` has no quotes. `collections: ['Tags']` names the fields
+that hold a list of values: their conditions are written with `any()` (`Tags/any(x: tolower(x) eq 'a')`,
+`not Tags/any(…)` for `<>`, `notin` and `notcontains`). `toODataFilter` gives the same text for your
+own requests.
 
 With `aggregation: true` (a service with `$apply`), summaries are computed there:
 `$apply=filter(…)/aggregate(Freight with sum as s0,$count as s1)`; without it they run in memory.

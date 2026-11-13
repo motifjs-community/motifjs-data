@@ -203,7 +203,7 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
   }
 
   private filterText(o: LoadOptions): string {
-    return o.filter ? toODataFilter(o.filter, { fields: this.fields, locale: this.locale, ignoreCase: this.odata.ignoreCase }) : 'true';
+    return o.filter ? toODataFilter(o.filter, { fields: this.fields, locale: this.locale, ignoreCase: this.odata.ignoreCase, collections: this.odata.collections }) : 'true';
   }
 
   private async loadPage(url: string, query: HttpRequestInit['query'], signal: AbortSignal | undefined) {

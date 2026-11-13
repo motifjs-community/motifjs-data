@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Fields that hold a list of values (arrays): a filter condition passes when one of the values does;
+  with `<>`, `notin` and `notcontains`, when none does. A list with no value that is not blank is
+  blank (`isblank`, `= null`), an empty list too. `ODataAdapter` writes these conditions with `any()`
+  for the fields named in its new `collections` option (`toODataFilter` takes it too); REST and SOAP
+  send the condition as it is.
+
 ## [0.1.0-beta.0] - 2026-10-30
 
 The first preview on npm (`npm i @motifx-community/data@beta`).

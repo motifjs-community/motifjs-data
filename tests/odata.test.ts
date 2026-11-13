@@ -87,6 +87,22 @@ describe('toODataFilter', () => {
     expect(toODataFilter(filter, { fields, locale: 'tr' })).toBe(expected);
   });
 
+  it('writes conditions on collections with any(): one value passes, none with a negative operator', () => {
+    const lists = (filter: data.FilterExpression) => toODataFilter(filter, { fields: { sizes: 'number' }, locale: 'tr', collections: ['tags', 'sizes'] });
+    expect(lists(where('tags', '=', 'MAVİ'))).toBe("tags/any(x: tolower(x) eq 'mavi')");
+    expect(lists(where('tags', '<>', 'mavi'))).toBe("not tags/any(x: tolower(x) eq 'mavi')");
+    expect(lists(where('tags', 'in', ['a', 'b']))).toBe("tags/any(x: (tolower(x) eq 'a' or tolower(x) eq 'b'))");
+    expect(lists(where('tags', 'notin', ['a']))).toBe("not tags/any(x: tolower(x) eq 'a')");
+    expect(lists(where('tags', 'notcontains', 'kır'))).toBe("not tags/any(x: contains(tolower(x),'kır'))");
+    expect(lists(where('sizes', 'between', [38, 42]))).toBe('sizes/any(x: (x ge 38 and x le 42))');
+    expect(lists(where('sizes', 'isblank'))).toBe('not sizes/any(x: x ne null)');
+    expect(lists(where('tags', '<>', ''))).toBe("tags/any(x: (x ne null and trim(x) ne ''))");
+    expect(lists(where('tags', 'contains', ''))).toBe('true');
+    expect(lists(where('tags', 'in', []))).toBe('false');
+    expect(lists(where('tags', 'notin', []))).toBe('true');
+    expect(lists(and(where('tags', '=', 'a'), where('name', '=', 'b'))!)).toBe("tags/any(x: tolower(x) eq 'a') and tolower(name) eq 'b'");
+  });
+
   it('compares text with case when ignoreCase is false', () => {
     expect(toODataFilter(where('city', '=', 'İstanbul'), { ignoreCase: false })).toBe("city eq 'İstanbul'");
   });
