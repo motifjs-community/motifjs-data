@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.0-beta.1] - 2026-11-14
+
 ### Added
 
 - Fields that hold a list of values (arrays): a filter condition passes when one of the values does;
