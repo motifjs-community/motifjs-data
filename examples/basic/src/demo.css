@@ -241,3 +241,40 @@ body {
   display: flex;
   gap: var(--mx-space-2);
 }
+
+.demo-subhead {
+  margin: var(--mx-space-2) 0 0;
+  font-size: var(--mx-font-size-body-large);
+}
+
+.demo-pivot-wrap {
+  overflow-x: auto;
+}
+
+.demo-pivot th {
+  white-space: nowrap;
+}
+
+.demo-pivot thead th.is-group {
+  text-align: center;
+}
+
+.demo-pivot .is-total,
+.demo-pivot tr.is-total th,
+.demo-pivot tr.is-total td {
+  font-weight: var(--mx-font-weight-semibold);
+}
+
+.demo-pivot tr.is-total {
+  background: var(--mx-color-bg-container);
+}
+
+.demo-pivot-toggle {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: var(--mx-font-weight-semibold);
+  cursor: pointer;
+}

@@ -9,8 +9,9 @@
 [Live demo](https://motifjs-community.github.io/motifjs-data/)
 
 The demo has one tab per use, each against a real service: 100,000 rows in memory, Northwind over
-OData, a lookup, a virtual list, DummyJSON over REST, editing TripPin's airlines with etags, and a local
-WCF service (`npm run wcf`). Run it with `npm run dev`.
+OData, a lookup, a virtual list, a pivot (100,000 rows in memory, and TripPin's people with `$apply`),
+DummyJSON over REST, editing TripPin's airlines with etags, and a local WCF service (`npm run wcf`).
+Run it with `npm run dev`.
 
 > **Preview** (`beta`): the adapters (`ArrayAdapter`, `RestAdapter`, `ODataAdapter` v4, `SoapAdapter` for WCF),
 > `DataSource` and `ChangeTracker` are in; the API may still change before 1.0.

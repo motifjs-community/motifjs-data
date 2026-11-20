@@ -26,6 +26,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   them in memory.
 - `countDistinct` summaries: the different values that are not empty, compared the way filters compare
   them; on OData with `aggregation`, `countdistinct`.
+- The demo has a Pivot tab: 100,000 orders by city and customer down, quarter and month across, with
+  four measures, members that open and close and a filter; and TripPin's people counted with `$apply`, in
+  one `$batch` or not, checked against the memory engine. In Chrome on a desktop machine the first pivot
+  of the orders took about 240 ms and later ones about 120 ms.
+
+### Fixed
+
+- The demo page says it has no icon, so the browser no longer asks for `/favicon.ico` and logs a 404.
 
 ## [0.1.0-beta.1] - 2026-11-14
 

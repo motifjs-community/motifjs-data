@@ -5,6 +5,7 @@ import { EditingSection } from './sections/editing-section';
 import { LookupSection } from './sections/lookup-section';
 import { MemorySection } from './sections/memory-section';
 import { ODataSection } from './sections/odata-section';
+import { PivotSection } from './sections/pivot-section';
 import { RestSection } from './sections/rest-section';
 import { VirtualSection } from './sections/virtual-section';
 import { WcfSection } from './sections/wcf-section';
@@ -14,6 +15,7 @@ const TABS = [
   { id: 'odata', title: 'OData', note: 'Northwind · query on the service' },
   { id: 'lookup', title: 'Lookup', note: 'search, a value off the page' },
   { id: 'virtual', title: 'Virtual list', note: 'blocks where the view is' },
+  { id: 'pivot', title: 'Pivot', note: 'memory and OData $apply' },
   { id: 'rest', title: 'REST', note: 'DummyJSON' },
   { id: 'editing', title: 'Editing', note: 'ChangeTracker · TripPin, etags' },
   { id: 'wcf', title: 'WCF', note: 'SOAP · local service' },
@@ -48,6 +50,7 @@ class Demo extends Component<HTMLDivElement> {
         <ODataSection x-wait={() => ui.tab !== 'odata'} />
         <LookupSection x-wait={() => ui.tab !== 'lookup'} />
         <VirtualSection x-wait={() => ui.tab !== 'virtual'} />
+        <PivotSection x-wait={() => ui.tab !== 'pivot'} />
         <RestSection x-wait={() => ui.tab !== 'rest'} />
         <EditingSection x-wait={() => ui.tab !== 'editing'} />
         <WcfSection x-wait={() => ui.tab !== 'wcf'} />
