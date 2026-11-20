@@ -229,3 +229,57 @@ describe('RestAdapter', () => {
     expect(outcomes).toMatchObject([{ ok: true, key: 50 }, { ok: false, error: { plainMessage: 'Locked' } }]);
   });
 });
+
+describe('RestAdapter pivots', () => {
+  const keys = (member: data.PivotMember) => member.children?.map((m) => m.key);
+
+  it('posts the pivot to its endpoint and reads the groups it answers', async () => {
+    const api = fakeApi(orders(4));
+    api.answer((call) =>
+      call.url.pathname === '/api/orders/pivot'
+        ? json({
+            groups: [
+              { rows: [], columns: [], count: 4, values: [60] },
+              { rows: ['c1'], columns: [], count: 1, values: [10] },
+              { rows: ['c0'], columns: [], count: 1, values: ['0'] },
+            ],
+          })
+        : undefined,
+    );
+    const adapter = make(api, { pivot: { url: '/api/orders/pivot' } });
+    expect(adapter.capabilities.pivot).toBe(true);
+    const p = await adapter.loadPivot({ filter: where('amount', '<', 100), rows: [{ field: 'customer', dir: 'desc' }], measures: [{ type: 'sum', field: 'amount' }], expandedRows: [['c1']], params: { tenant: 'a' } });
+    const call = api.calls[0];
+    expect([api.calls.length, call.method, call.url.pathname, call.url.searchParams.get('tenant')]).toEqual([1, 'POST', '/api/orders/pivot', 'a']);
+    expect(call.body).toEqual({
+      filter: { field: 'amount', op: '<', value: 100 },
+      rows: [{ field: 'customer', dir: 'desc' }],
+      columns: [],
+      measures: [{ type: 'sum', field: 'amount' }],
+      expandedRows: [['c1']],
+      expandedColumns: true,
+    });
+    expect([keys(p.rows), p.values(p.rows.children![1], p.columns), p.values(p.rows, p.columns)]).toEqual([['c1', 'c0'], [0], [60]]);
+  });
+
+  it('writes and reads the endpoint its own way, and groups in memory without one', async () => {
+    const api = fakeApi(orders(4));
+    api.answer((call) => (call.url.pathname === '/api/pivot' ? json([{ rows: [], columns: [], count: 4, values: [] }]) : undefined));
+    const adapter = make(api, { pivot: { url: '/api/pivot', method: 'PUT', write: (o) => ({ by: o.rows?.map((l) => l.field) }), read: (body) => body as unknown[] } });
+    const p = await adapter.loadPivot({ rows: [{ field: 'customer' }] });
+    expect([api.calls[0].method, api.calls[0].body, p.rows.count]).toEqual(['PUT', { by: ['customer'] }, 4]);
+
+    api.calls.length = 0;
+    const memory = await make(api).loadPivot({ rows: [{ field: 'customer' }], measures: [{ type: 'sum', field: 'amount' }] });
+    expect([api.calls.map((c) => c.url.pathname), keys(memory.rows), memory.values(memory.rows, memory.columns)]).toEqual([['/api/orders'], ['c0', 'c1', 'c2', 'c3'], [60]]);
+  });
+
+  it('fails with an answer that holds no groups', async () => {
+    const api = fakeApi([]);
+    api.answer(() => json({ rows: [] }));
+    const adapter = make(api, { pivot: { url: '/api/pivot' } });
+    await expect(adapter.loadPivot({ rows: [{ field: 'customer' }] })).rejects.toMatchObject({ code: 'MJD104', plainMessage: 'The answer could not be read: no "groups" array.' });
+    api.answer(() => json({ groups: [{ rows: 'c1' }] }));
+    await expect(adapter.loadPivot({ rows: [{ field: 'customer' }] })).rejects.toMatchObject({ code: 'MJD104' });
+  });
+});

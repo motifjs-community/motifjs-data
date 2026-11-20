@@ -8,12 +8,14 @@ import { HttpAdapter } from '../http/http-adapter';
 import { requestParams } from '../http/request-params';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import type { PivotLoadOptions } from '../query/pivot-load-options';
 import type { RestAdapterOptions } from './rest-adapter-options';
-import { defaultLoadQuery, defaultReadRows, defaultReadSaved } from './rest-defaults';
+import { defaultLoadQuery, defaultPivotBody, defaultReadPivot, defaultReadRows, defaultReadSaved } from './rest-defaults';
 
 /**
  * A REST endpoint: `GET url` loads, `GET url/key` finds, `POST url` inserts, `PATCH url/key` updates,
- * `DELETE url/key` removes. Use `capabilities` to say what the endpoint cannot do.
+ * `DELETE url/key` removes; with `pivot`, an endpoint computes pivots. Use `capabilities` to say what
+ * the endpoint cannot do.
  */
 export class RestAdapter<T = Record<string, unknown>, K = unknown> extends HttpAdapter<T, K> {
   private readonly rest: RestAdapterOptions<T, K>;
@@ -25,13 +27,24 @@ export class RestAdapter<T = Record<string, unknown>, K = unknown> extends HttpA
   }
 
   protected backendCapabilities(): Capabilities {
-    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary: false, insert: true, update: true, remove: true };
+    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary: false, pivot: !!this.rest.pivot, insert: true, update: true, remove: true };
   }
 
   protected async loadRows(options: LoadOptions): Promise<LoadResult<T>> {
     const query = { ...(this.rest.loadQuery ?? defaultLoadQuery)(options), ...(options.params as Record<string, string>) };
     const response = await this.send({ operation: 'load', method: 'GET', url: this.rest.url, query, signal: options.signal });
     return (this.rest.readRows ?? defaultReadRows<T>)(response.body, options, response);
+  }
+
+  protected override async loadPivotGroups(options: PivotLoadOptions<T>): Promise<unknown> {
+    const pivot = this.rest.pivot!;
+    const data = (pivot.write ?? defaultPivotBody)(options);
+    const response = await this.send({ operation: 'load', method: pivot.method ?? 'POST', url: pivot.url, data, query: requestParams(options), signal: options.signal });
+    try {
+      return (pivot.read ?? defaultReadPivot)(response.body, options);
+    } catch (error) {
+      throw DataError.create('MJD104', { operation: 'load', details: response.body, cause: error }, (error as Error).message);
+    }
   }
 
   protected override async findRow(key: K, options: ByKeyOptions): Promise<T | undefined> {

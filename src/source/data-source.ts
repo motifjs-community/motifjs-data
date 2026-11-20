@@ -10,6 +10,8 @@ import { queryArray } from '../query/local-query';
 import type { EvaluateContext } from '../query/evaluate-context';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import type { PivotLoadOptions } from '../query/pivot-load-options';
+import type { PivotLoadResult } from '../query/pivot-load-result';
 import type { RowGroup } from '../query/row-group';
 import { createRowFilter } from '../query/row-filter';
 import { sortRows } from '../query/sort';
@@ -265,6 +267,15 @@ export class DataSource<T = Record<string, unknown>, K = unknown> extends Dispos
     const { filter, params, expand } = this.loadOptions(false);
     const result = await this.adapter.load({ filter, params, expand, summary: items, take: 0, signal: options.signal });
     return result.summary ?? [];
+  }
+
+  /**
+   * A pivot over the current query (filter, search, params) and the pivot's own `filter`, from the adapter (see
+   * `DataAdapter.loadPivot`). The rows the source holds stay as they are. A failure rejects.
+   */
+  loadPivot(options: PivotLoadOptions<T> = {}): Promise<PivotLoadResult> {
+    const { filter, params, expand } = this.loadOptions(false);
+    return this.adapter.loadPivot({ ...options, filter: and(filter, options.filter), params: options.params ?? params, expand: options.expand ?? expand });
   }
 
   /** Loads the rows again, keeping the page or the view. Until they arrive, `'all'` and `'page'` keep the old ones. */

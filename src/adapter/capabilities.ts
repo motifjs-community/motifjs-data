@@ -7,6 +7,8 @@ export interface Capabilities {
   select: boolean;
   group: boolean;
   summary: boolean;
+  /** Pivots (`loadPivot`); missing means no. */
+  pivot?: boolean;
   insert: boolean;
   update: boolean;
   remove: boolean;

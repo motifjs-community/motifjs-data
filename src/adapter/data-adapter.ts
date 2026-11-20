@@ -7,6 +7,10 @@ import type { FieldType } from '../query/field-type';
 import { queryArray } from '../query/local-query';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import { isPivotInterval, pivotResult, queryPivot, readPivotGroup } from '../query/pivot';
+import type { PivotGroup } from '../query/pivot-group';
+import type { PivotLoadOptions } from '../query/pivot-load-options';
+import type { PivotLoadResult } from '../query/pivot-load-result';
 import type { RowGroup } from '../query/row-group';
 import type { AdapterEvents } from './adapter-events';
 import type { BatchResult } from './batch-result';
@@ -21,7 +25,7 @@ import { RowKeys } from './row-keys';
 import type { SaveOutcome } from './save-outcome';
 import type { WriteOptions } from './write-options';
 
-const SUMMARY_TYPES = new Set(['count', 'sum', 'min', 'max', 'avg']);
+const SUMMARY_TYPES = new Set(['count', 'countDistinct', 'sum', 'min', 'max', 'avg']);
 
 /**
  * Base class of all adapters. A subclass talks to its backend (`loadRows`, `insertRow`, `updateRow`,
@@ -104,6 +108,46 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
       const result = await this.query(checked, 'load');
       this.loadedEmitter.fire({ options: checked, result });
       return result;
+    } catch (error) {
+      throw this.reportFailure(error, 'load');
+    }
+  }
+
+  /**
+   * The members and measures of a pivot (see `PivotLoadOptions`), totals included. A backend that computes pivots
+   * (`capabilities.pivot`) is asked for them, unless they need memory (a computed value, a custom measure, an interval
+   * the backend cannot compute); otherwise the rows that `filter` passes are loaded with `load` and grouped here.
+   */
+  async loadPivot(options: PivotLoadOptions<T> = {}): Promise<PivotLoadResult> {
+    let checked: PivotLoadOptions<T>;
+    try {
+      checked = this.checkPivotOptions(options);
+      this.throwIfAborted(checked.signal, 'load');
+    } catch (error) {
+      throw this.reportFailure(error, 'load');
+    }
+    const ctx = this.evaluateContext;
+    if (!this.capabilities.pivot || !this.pivotRemotely(checked)) {
+      const { filter, expand, params, signal } = checked;
+      // `load` reports its own failure.
+      const { rows } = await this.load({ filter, expand, params, signal });
+      try {
+        return queryPivot(rows, { ...checked, filter: null }, ctx);
+      } catch (error) {
+        throw this.reportFailure(error, 'load');
+      }
+    }
+    try {
+      const groups = await this.loadPivotGroups(checked);
+      this.throwIfAborted(checked.signal, 'load');
+      if (!Array.isArray(groups)) throw DataError.create('MJD104', { operation: 'load', details: groups }, 'no pivot groups');
+      let read: PivotGroup[];
+      try {
+        read = groups.map((group) => readPivotGroup(group, checked, this.fields));
+      } catch (error) {
+        throw DataError.create('MJD104', { operation: 'load', details: groups, cause: error }, (error as Error).message);
+      }
+      return pivotResult(read, checked, ctx);
     } catch (error) {
       throw this.reportFailure(error, 'load');
     }
@@ -286,6 +330,17 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
   /** For backends that take many changes in one request (OData `$batch`, a SOAP call). */
   protected saveBatch?(changes: readonly Change<T, K>[], options: OperationOptions): Promise<BatchResult<T>[]>;
 
+  /** For a backend that computes pivots (`capabilities.pivot`): the groups of the options as it sends them (see `PivotGroup`). */
+  protected loadPivotGroups(_options: PivotLoadOptions<T>): Promise<unknown> {
+    return Promise.reject(DataError.create('MJD301', { operation: 'load' }, 'compute pivots'));
+  }
+
+  /** Whether the backend can compute this pivot; computed values and custom measures need memory. */
+  protected pivotRemotely(options: PivotLoadOptions<T>): boolean {
+    const levels = [...(options.rows ?? []), ...(options.columns ?? [])];
+    return !levels.some((level) => level.value) && !(options.measures ?? []).some((measure) => measure.type === 'custom' || measure.value);
+  }
+
   protected applyPushedChanges(_changes: readonly PushedChange<T, K>[]): void {}
 
   /** How memory reads, compares and sorts this adapter's rows. */
@@ -357,9 +412,50 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
       const items = o[name];
       if (!items) continue;
       const bad = items.find((s) => !s || !SUMMARY_TYPES.has(s.type) || (s.type !== 'count' && typeof s.field !== 'string'));
-      if (bad) throw invalid(`${name} items are { type: "count" | "sum" | "min" | "max" | "avg", field } (count needs no field)`);
+      if (bad) throw invalid(`${name} items are { type: "count" | "countDistinct" | "sum" | "min" | "max" | "avg", field } (count needs no field)`);
       out[name] = items.map((s) => ({ ...s }));
     }
+    return out;
+  }
+
+  private checkPivotOptions(o: PivotLoadOptions<T>): PivotLoadOptions<T> {
+    const invalid = (detail: string) => DataError.create('MJD302', { operation: 'load' }, detail);
+    const out: PivotLoadOptions<T> = { ...o };
+    if (o.filter) {
+      try {
+        validateFilter(o.filter);
+      } catch (e) {
+        throw invalid((e as Error).message);
+      }
+    } else {
+      delete out.filter;
+    }
+    for (const name of ['rows', 'columns'] as const) {
+      const levels = o[name];
+      if (!levels) continue;
+      const level = (l: (typeof levels)[number]) =>
+        !!l && typeof l.field === 'string' && isPivotInterval(l.interval) && (l.dir === undefined || l.dir === 'asc' || l.dir === 'desc') && (l.value === undefined || typeof l.value === 'function');
+      if (!Array.isArray(levels) || !levels.every(level)) throw invalid(`${name} items are { field, interval?, dir?: "asc" | "desc", value? }`);
+      out[name] = levels.map((l) => ({ ...l }));
+    }
+    if (o.measures) {
+      const measure = (m: (typeof o.measures)[number]) => {
+        if (!m) return false;
+        if (m.type === 'custom') return typeof m.start === 'function' && typeof m.add === 'function' && typeof m.result === 'function';
+        return SUMMARY_TYPES.has(m.type) && (m.type === 'count' || typeof m.field === 'string' || typeof m.value === 'function');
+      };
+      if (!Array.isArray(o.measures) || !o.measures.every(measure)) {
+        throw invalid('measures are { type, field } of a summary type (count needs no field), or { type: "custom", start, add, result }');
+      }
+      out.measures = o.measures.map((m) => ({ ...m }));
+    }
+    for (const name of ['expandedRows', 'expandedColumns'] as const) {
+      const paths = o[name];
+      if (paths === undefined || paths === true) continue;
+      if (!Array.isArray(paths) || !paths.every(Array.isArray)) throw invalid(`${name} is true or a list of paths (arrays of keys)`);
+      out[name] = paths.map((path) => [...path]);
+    }
+    if (o.expand) out.expand = [...o.expand];
     return out;
   }
 

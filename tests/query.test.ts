@@ -209,7 +209,15 @@ describe('grouping and summaries', () => {
     expect(
       data.summarize(sales, [count, sum, { type: 'avg', field: 'amount' }, { type: 'min', field: 'day' }, { type: 'max', field: 'city' }, { type: 'min', field: 'amount' }], ctx),
     ).toEqual([6, 72, 14.4, '2023-12-31', 'Oslo', 5]);
-    expect(data.summarize([], [count, sum, { type: 'avg', field: 'amount' }, { type: 'max', field: 'amount' }])).toEqual([0, 0, null, null]);
+    expect(data.summarize([], [count, sum, { type: 'avg', field: 'amount' }, { type: 'max', field: 'amount' }, { type: 'countDistinct', field: 'city' }])).toEqual([0, 0, null, null, 0]);
+  });
+
+  it('counts distinct values the way filters compare them, empty ones left out', () => {
+    const distinct = (field: string) => ({ type: 'countDistinct', field }) as const;
+    expect(data.summarize(sales, [distinct('city'), distinct('country'), distinct('amount'), distinct('day')], { locale: 'tr' })).toEqual([4, 3, 5, 6]);
+    // By day: two moments of one day are one value.
+    const moments = [{ at: new Date(2024, 0, 5, 9) }, { at: new Date(2024, 0, 5, 18) }, { at: new Date(2024, 0, 6) }];
+    expect([data.summarize(moments, [distinct('at')], { fields: { at: 'date' } }), data.summarize(moments, [distinct('at')])]).toEqual([[2], [3]]);
   });
 
   it('counts empty values as 0 when asked, and reads a field through summaryValue', () => {

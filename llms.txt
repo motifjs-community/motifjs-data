@@ -79,8 +79,37 @@ happen on the rows it returns. Text compares without case in the adapter's `loca
 **Groups and summaries.** `group: [{ field: 'country' }]` returns `groups` (levels, each with `key`,
 `count`, its rows or the level below, and the values of `groupSummary`) and `rows` in group order; with
 `skip` and `take` a page holds top-level groups. `summary: [{ type: 'sum', field: 'amount' }]` returns
-its values over every matching row (`count`, `sum`, `min`, `max`, `avg`). Values group the way filters
-compare them. A backend that cannot group or sum gets every matching row and the rest runs in memory.
+its values over every matching row (`count`, `countDistinct`, `sum`, `min`, `max`, `avg`). Values group
+the way filters compare them. A backend that cannot group or sum gets every matching row and the rest
+runs in memory.
+
+**Pivots.** `loadPivot` groups the rows two ways at once, by the `rows` levels and the `columns`
+levels, and gives the `measures` of every crossing and of every total:
+
+```ts
+const p = await orders.loadPivot({
+  filter: data.where('Freight', '>', 5),
+  rows: [{ field: 'ShipCountry' }, { field: 'ShipCity' }],
+  columns: [{ field: 'OrderDate', interval: 'year' }, { field: 'OrderDate', interval: 'quarter' }],
+  measures: [{ type: 'sum', field: 'Freight' }, { type: 'count' }],
+  expandedRows: [['France']],
+});
+const france = p.rows.children![0];
+p.values(france, p.columns); // [sum, count] of France over every year
+p.values(p.rows, p.columns); // the grand total
+```
+
+`p.rows` and `p.columns` are the roots of the axes (the grand totals); each member has its `key`,
+its `path` from the top, its `count` of rows and, when it is expanded, its `children` in order
+(`dir`, empty values last). `expandedRows` and `expandedColumns` list the members whose children are
+wanted, by path (`true`, the default, for all); a member is shown when every member above it is. A
+level's `interval` groups dates by `'year'`, `'quarter'`, `'month'`, `'day'`, `'dayOfWeek'` or
+`'date'` (local time) and numbers by ranges of a width (`100`: 0, 100, 200 …). Totals come from their
+rows, so the average of a total is the average of its rows. A level or a measure can read a value of
+its own (`value: (row) => …`), and `{ type: 'custom', start, add, result }` is a measure of your own;
+both run in memory only. A backend that computes pivots (`capabilities.pivot`: OData with
+`aggregation`, REST with `pivot`) is asked for the groups (`PivotGroup`); otherwise the matching rows
+are loaded and `queryPivot` groups them in memory.
 
 **Filters are plain data:** `data.where(field, op, value)` joined with `data.and`, `data.or`, `data.not`. Operators: `=`
 `<>` `<` `<=` `>` `>=` `contains` `notcontains` `startswith` `endswith` `between` `in` `notin`
@@ -174,9 +203,10 @@ ask for it again; in `'all'` it follows every change of the rows. `'blocks'` doe
 
 For a view that needs other values than the source's own, `loadGroups(group, { groupSummary })` gives
 the groups of the current query with their counts and those summaries, without rows, and
-`loadSummary(items)` the summary values of the current query over every matching row; neither touches
-the rows the source holds. An item's `skipEmpty: false` counts empty values as 0 in `sum` and `avg`
-(memory only), and the evaluate context's `summaryValue` reads a field through a function.
+`loadSummary(items)` the summary values of the current query over every matching row, and
+`loadPivot(options)` a pivot of the current query; none of them touches the rows the source holds. An
+item's `skipEmpty: false` counts empty values as 0 in `sum` and `avg` (memory only), and the evaluate
+context's `summaryValue` reads a field through a function.
 
 When the adapter cannot do all of a `'page'` query (it cannot filter, sort, group or sum the way it is
 asked), the matching rows would come whole anyway: they load once per row set (filter, search,
@@ -257,6 +287,27 @@ a REST batch endpoint, a SOAP `save` operation), else one request per row. New r
 `itemUrl`, `updateMethod`, `loadQuery`, `readRows` (it also gets the response, for a total in a
 header), `readSaved`; give `batch` for an endpoint that takes many changes in one request.
 
+`pivot: { url }` names an endpoint that computes pivots. It gets a `POST` with the options as JSON
+(`defaultPivotBody`):
+
+```json
+{
+  "filter": { "field": "Freight", "op": ">", "value": 5 },
+  "rows": [{ "field": "ShipCountry" }, { "field": "ShipCity" }],
+  "columns": [{ "field": "OrderDate", "interval": "year" }],
+  "measures": [{ "type": "sum", "field": "Freight" }, { "type": "count" }],
+  "expandedRows": [["France"]],
+  "expandedColumns": true
+}
+```
+
+and answers with the groups, an array or `{ "groups": [...] }`: for every row depth (0 to the number of
+row levels) and every column depth, the rows grouped by the levels down to those depths, each as
+`{ "rows": ["France"], "columns": [1997], "count": 12, "values": [340.5, 12] }`. A depth of 0 is the
+total of its axis. From depth 2 a group is sent only under a member that is expanded and shown itself:
+here the cities of France only. `method`, `write` and `read` change the request and how the answer is
+read. Computed values and custom measures cannot be sent: such a pivot is grouped in memory.
+
 ## ODataAdapter
 
 ```ts
@@ -288,6 +339,12 @@ own requests.
 
 With `aggregation: true` (a service with `$apply`), summaries are computed there:
 `$apply=filter(…)/aggregate(Freight with sum as s0,$count as s1)`; without it they run in memory.
+Pivots too: one `groupby` per pair of depths of their axes, under the expanded members,
+`$apply=filter(…)/filter(ShipCountry eq 'France')/groupby((ShipCountry,ShipCity),aggregate($count as _n,Freight with sum as _m0))`.
+`aggregation: { batch: true }` sends those reads in one `$batch` request. A level with an interval needs
+`aggregation: { compute: true }`, a service that takes `compute` (`year()`, `month()`, `day()`,
+`date()`, `floor()`; dates by the service's clock), or it is grouped in memory; `'dayOfWeek'` has no
+OData function and is always grouped in memory.
 
 Reads send no custom header, so a browser sends them without a CORS preflight; `OData-Version` and
 `OData-MaxVersion` go with writes. When the service answers in pages, `@odata.nextLink` is followed until

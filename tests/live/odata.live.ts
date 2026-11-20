@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { data } from '../../src';
-const { and, ChangeTracker, DataSource, not, ODataAdapter, or, queryArray, sortRows, where } = data;
+const { and, ChangeTracker, DataSource, not, ODataAdapter, or, queryArray, queryPivot, sortRows, where } = data;
 
 // Northwind is read only; TripPinServiceRW keeps writes in a private session per run.
 const NORTHWIND = 'https://services.odata.org/V4/Northwind/Northwind.svc/';
@@ -165,6 +165,50 @@ describe('ODataAdapter on TripPin RESTier ($apply)', () => {
     expect(server.summary!.slice(0, 4)).toEqual(memory.slice(0, 4));
     expect(Number(server.summary![4])).toBeCloseTo(Number(memory[4]), 6);
     expect(memory[0]).toBeGreaterThan(0);
+  });
+
+  it('computes a pivot on the service the way memory does', async () => {
+    const all = (await people.load()).rows;
+    const options: data.PivotLoadOptions<Row> = {
+      rows: [{ field: 'Gender' }, { field: 'LastName' }],
+      columns: [{ field: 'FavoriteFeature' }],
+      measures: [{ type: 'count' }, { type: 'sum', field: 'Age' }, { type: 'min', field: 'Age' }, { type: 'max', field: 'Age' }],
+      expandedRows: [['Female']],
+    };
+    const requests: string[] = [];
+    const sub = people.onRequesting((r) => requests.push(r.query.get('$apply') ?? ''));
+    const server = await people.loadPivot(options);
+    sub.dispose();
+    const memory = queryPivot(all, options, { locale: 'en-US' });
+    expect(requests).toHaveLength(6);
+    const shape = (p: data.PivotLoadResult) => {
+      const rows = [p.rows, ...p.rows.children!.flatMap((m) => [m, ...(m.children ?? [])])];
+      const columns = [p.columns, ...p.columns.children!];
+      return rows.map((r) => [r.path, r.count, columns.map((c) => p.values(r, c) ?? null)]);
+    };
+    expect(shape(server)).toEqual(shape(memory));
+    expect(server.rows.children!.length).toBeGreaterThan(1);
+  });
+
+  // TripPin answers 500 to any `compute` (even `compute(Age as a)`), so `aggregation.compute` is tested with fakes only.
+  it('sends the reads of a pivot in one $batch', async () => {
+    const batched = new ODataAdapter<Row, string>({
+      url: `https://services.odata.org/TripPinRESTierService/(S(motifjsbatch${Date.now()}))/People`,
+      key: 'UserName',
+      locale: 'en-US',
+      aggregation: { batch: true },
+      retry: { retries: 2 },
+    });
+    const all = (await batched.load()).rows;
+    const options: data.PivotLoadOptions<Row> = { rows: [{ field: 'FavoriteFeature' }], columns: [{ field: 'Gender' }], measures: [{ type: 'count' }] };
+    const requests: string[] = [];
+    const sub = batched.onRequesting((r) => requests.push(`${r.method} ${r.url}`));
+    const server = await batched.loadPivot(options);
+    sub.dispose();
+    const memory = queryPivot(all, options, { locale: 'en-US' });
+    expect(requests).toEqual([expect.stringMatching(/^POST .*\/\$batch$/)]);
+    const cells = (p: data.PivotLoadResult) => [p.rows, ...p.rows.children!].map((r) => [r.key, r.count, [p.columns, ...p.columns.children!].map((c) => p.values(r, c)?.[0] ?? 0)]);
+    expect(cells(server)).toEqual(cells(memory));
   });
 });
 

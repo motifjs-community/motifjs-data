@@ -357,3 +357,123 @@ describe('ODataAdapter', () => {
     ]);
   });
 });
+
+describe('ODataAdapter pivots', () => {
+  type Sale = { id: number; region: string; city: string; day: string; amount: number; customer?: { country: string } };
+  const sales: Sale[] = [
+    { id: 1, region: 'North', city: 'Oslo', day: '2023-06-01', amount: 30, customer: { country: 'TR' } },
+    { id: 2, region: 'North', city: 'Bergen', day: '2024-02-03', amount: 10, customer: { country: 'DE' } },
+    { id: 3, region: 'South', city: 'Rome', day: '2024-08-15', amount: 20, customer: { country: 'TR' } },
+  ];
+  const sales$ = (service: ReturnType<typeof fakeService>, aggregation: data.ODataAdapterOptions<Sale, number>['aggregation'], more: Partial<data.ODataAdapterOptions<Sale, number>> = {}) =>
+    new ODataAdapter<Sale, number>({ url: 'https://host/odata/Sales', key: 'id', locale: 'en-US', fields: { day: 'date' }, fetch: service.fetch, aggregation, ...more });
+  /** Answers each `$apply` from `groups`, and a read without one with the rows. */
+  const serviceOf = (groups: Record<string, unknown[]>) => fakeService((call) => (call.query.$apply ? json({ value: groups[call.query.$apply] ?? [] }) : json({ value: sales })));
+  const keys = (member: data.PivotMember) => member.children?.map((m) => m.key);
+  const measures: data.PivotMeasure[] = [{ type: 'sum', field: 'amount' }, { type: 'count' }, { type: 'countDistinct', field: 'city' }];
+  const values = 'aggregate($count as _n,amount with sum as _m0,city with countdistinct as _m2)';
+
+  it('asks the service with $apply for each pair of depths of the axes', async () => {
+    const service = serviceOf({
+      [`filter(amount gt 5)/${values}`]: [{ '@odata.id': null, _n: 3, _m0: '60', _m2: 3 }],
+      [`filter(amount gt 5)/groupby((customer/country),${values})`]: [
+        { customer: { country: 'TR' }, _n: 2, _m0: 50, _m2: 2 },
+        { customer: { country: 'DE' }, _n: 1, _m0: 10, _m2: 1 },
+      ],
+      [`filter(amount gt 5)/groupby((region),${values})`]: [
+        { region: 'South', _n: 1, _m0: 20, _m2: 1 },
+        { region: 'North', _n: 2, _m0: 40, _m2: 2 },
+      ],
+      [`filter(amount gt 5)/groupby((region,customer/country),${values})`]: [
+        { region: 'North', customer: { country: 'TR' }, _n: 1, _m0: 30, _m2: 1 },
+        { region: 'North', customer: { country: 'DE' }, _n: 1, _m0: 10, _m2: 1 },
+        { region: 'South', customer: { country: 'TR' }, _n: 1, _m0: 20, _m2: 1 },
+      ],
+    });
+    const adapter = sales$(service, true);
+    expect(adapter.capabilities.pivot).toBe(true);
+    const p = await adapter.loadPivot({ filter: where('amount', '>', 5), rows: [{ field: 'region' }], columns: [{ field: 'customer.country' }], measures });
+    expect(service.calls).toHaveLength(4);
+    expect([keys(p.rows), keys(p.columns)]).toEqual([['North', 'South'], ['DE', 'TR']]);
+    const [north] = p.rows.children!;
+    const [de, tr] = p.columns.children!;
+    expect([p.values(north, tr), p.values(north, de), p.values(p.rows.children![1], de)]).toEqual([[30, 1, 1], [10, 1, 1], undefined]);
+    expect([p.values(p.rows, p.columns), p.rows.count, tr.count]).toEqual([[60, 3, 3], 3, 2]);
+  });
+
+  it('computes intervals with compute and the children of the expanded members only', async () => {
+    const sum = 'aggregate($count as _n,amount with sum as _m0)';
+    const service = serviceOf({
+      [`compute(year(day) as _r0)/groupby((_r0),${sum})`]: [
+        { _r0: 2023, _n: 1, _m0: 30 },
+        { _r0: 2024, _n: 2, _m0: 30 },
+      ],
+      [`compute(year(day) as _r0,(month(day) add 2) div 3 as _r1)/filter(_r0 eq 2024)/groupby((_r0,_r1),${sum})`]: [
+        { _r0: 2024, _r1: 3, _n: 1, _m0: 20 },
+        { _r0: 2024, _r1: 1, _n: 1, _m0: 10 },
+      ],
+    });
+    const rows: data.PivotLevel[] = [{ field: 'day', interval: 'year' }, { field: 'day', interval: 'quarter' }];
+    const p = await sales$(service, { compute: true }).loadPivot({ rows, measures: [{ type: 'sum', field: 'amount' }], expandedRows: [[2024]] });
+    expect(service.calls.map((c) => c.query.$apply)).toEqual([sum, `compute(year(day) as _r0)/groupby((_r0),${sum})`, `compute(year(day) as _r0,(month(day) add 2) div 3 as _r1)/filter(_r0 eq 2024)/groupby((_r0,_r1),${sum})`]);
+    expect(p.rows.children!.map((m) => [m.key, keys(m)])).toEqual([[2023, undefined], [2024, [1, 3]]]);
+
+    service.calls.length = 0;
+    await sales$(service, { compute: true }).loadPivot({
+      rows: [{ field: 'day', interval: 'date' }, { field: 'region' }],
+      columns: [{ field: 'amount', interval: 100 }],
+      expandedRows: [['2024-02-03'], ['2024-08-15']],
+    });
+    expect(service.calls.map((c) => c.query.$apply)).toContain(
+      "compute(date(day) as _r0,floor(amount div 100.0) mul 100 as _c0)/filter((_r0 eq 2024-02-03) or (_r0 eq 2024-08-15))/groupby((_r0,region,_c0),aggregate($count as _n))",
+    );
+  });
+
+  it('groups the rows in memory when the pivot needs it', async () => {
+    const service = serviceOf({});
+    const sum = { type: 'sum', field: 'amount' } as const;
+    const median = { type: 'custom' as const, field: 'amount', start: () => 0, add: (s: number, v: unknown) => s + (v as number), result: (s: number) => s };
+    const cases: data.PivotLoadOptions<Sale>[] = [
+      { rows: [{ field: 'day', interval: 'year' }], measures: [sum] },
+      { rows: [{ field: 'day', interval: 'dayOfWeek' }], measures: [sum] },
+      { rows: [{ field: 'region', value: (s) => s.region.toUpperCase() }], measures: [sum] },
+      { rows: [{ field: 'region' }], measures: [median] },
+    ];
+    const results = [];
+    for (const [i, options] of cases.entries()) results.push(await sales$(service, i === 1 ? { compute: true } : true).loadPivot(options));
+    expect(service.calls.every((c) => c.query.$apply === undefined)).toBe(true);
+    expect(results.map((p) => [keys(p.rows), p.values(p.rows, p.columns)])).toEqual([
+      [[2023, 2024], [60]],
+      [[4, 6], [60]],
+      [['NORTH', 'SOUTH'], [60]],
+      [['North', 'South'], [60]],
+    ]);
+    // Without aggregation every pivot is grouped in memory.
+    expect(sales$(service, undefined).capabilities.pivot).toBe(false);
+  });
+
+  it('sends its reads in one $batch with aggregation.batch, and fails with an answer that failed', async () => {
+    const ok = (body: unknown, id: string) => httpPart('200 OK', { 'Content-Type': 'application/json' }, body, id);
+    let second = ok({ value: [{ region: 'North', _n: 3 }] }, '2');
+    const service = fakeService(() => batchAnswer('b', [second, ok({ value: [{ _n: 3 }] }, '1')]));
+    const adapter = sales$(service, { batch: true }, { batch: { url: 'https://host/odata/$batch' } });
+    const p = await adapter.loadPivot({ rows: [{ field: 'region' }], params: { tenant: 'a' } });
+    expect(service.calls).toHaveLength(1);
+    const call = service.calls[0];
+    expect([call.method, call.url]).toEqual(['POST', 'https://host/odata/$batch']);
+    expect(call.body).toContain('GET https://host/odata/Sales?$apply=aggregate($count%20as%20_n)&tenant=a HTTP/1.1');
+    expect(call.body).toContain('GET https://host/odata/Sales?$apply=groupby((region),aggregate($count%20as%20_n))&tenant=a HTTP/1.1');
+    expect([keys(p.rows), p.rows.count]).toEqual([['North'], 3]);
+
+    second = httpPart('400 Bad Request', { 'Content-Type': 'application/json' }, { error: { code: '', message: 'No groupby here' } }, '2');
+    await expect(adapter.loadPivot({ rows: [{ field: 'region' }] })).rejects.toMatchObject({ code: 'MJD202', plainMessage: 'No groupby here' });
+    const broken = sales$(fakeService(() => json({ rows: [] })), true);
+    await expect(broken.loadPivot({ rows: [{ field: 'region' }] })).rejects.toMatchObject({ code: 'MJD104' });
+  });
+
+  it('counts distinct values on the service', async () => {
+    const service = fakeService(() => json({ value: [{ s0: '2' }] }));
+    const result = await sales$(service, true).load({ summary: [{ type: 'countDistinct', field: 'city' }], take: 0 });
+    expect([service.calls[0].query.$apply, result.summary]).toEqual(['aggregate(city with countdistinct as s0)', [2]]);
+  });
+});

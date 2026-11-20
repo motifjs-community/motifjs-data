@@ -1,4 +1,5 @@
 import type { HttpAdapterOptions } from '../http/http-adapter-options';
+import type { ODataAggregationOptions } from './odata-aggregation-options';
 import type { ODataBatchOptions } from './odata-batch-options';
 
 export interface ODataAdapterOptions<T, K> extends HttpAdapterOptions<T> {
@@ -18,8 +19,8 @@ export interface ODataAdapterOptions<T, K> extends HttpAdapterOptions<T> {
   followNextLink?: boolean;
   /** Changes each row read from the service, e.g. date strings into `Date`s. */
   readRow?: (row: Record<string, unknown>) => T;
-  /** The service supports `$apply` (OData Data Aggregation): summaries are computed there. Default `false`. */
-  aggregation?: boolean;
+  /** The service supports `$apply` (OData Data Aggregation): summaries and pivots are computed there. Default `false`. */
+  aggregation?: boolean | ODataAggregationOptions;
   /** Saves many changes in one `$batch` request. */
   batch?: boolean | ODataBatchOptions;
 }

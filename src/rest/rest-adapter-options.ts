@@ -3,6 +3,7 @@ import type { HttpResponse } from '../http/http-response';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
 import type { RestBatch } from './rest-batch';
+import type { RestPivot } from './rest-pivot';
 
 export interface RestAdapterOptions<T, K> extends HttpAdapterOptions<T> {
   url: string;
@@ -17,4 +18,6 @@ export interface RestAdapterOptions<T, K> extends HttpAdapterOptions<T> {
   /** Default: the body when it is an object. */
   readSaved?: (body: unknown) => Partial<T> | void;
   batch?: RestBatch<T, K>;
+  /** An endpoint that computes pivots; without it a pivot is grouped in memory. */
+  pivot?: RestPivot<T>;
 }

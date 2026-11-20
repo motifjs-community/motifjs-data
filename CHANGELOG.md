@@ -6,6 +6,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Pivots: `loadPivot(options)` on every adapter and on `DataSource` (over its query) groups the rows by
+  `rows` levels and `columns` levels at once and gives the `measures` of every crossing and every total.
+  The result holds the two axes as member trees (`key`, `path`, `count`, `children`) and
+  `values(row, column)`. Only the children of `expandedRows` and `expandedColumns` are computed. A
+  level groups dates by `'year'`, `'quarter'`, `'month'`, `'day'`, `'dayOfWeek'` or `'date'`, and
+  numbers by ranges of a width. Totals come from their rows (the average of a total is that of its
+  rows). Levels and measures can read computed values, and `{ type: 'custom', start, add, result }`
+  is a measure of your own. In memory (`queryPivot`, `pivotGroups`, `pivotResult`) 100,000 rows on two
+  levels each way with three measures took about 110 ms in Node on a desktop machine.
+- `capabilities.pivot`: a backend that computes pivots is asked for the groups (`PivotGroup`).
+  `ODataAdapter` with `aggregation` sends one `$apply` `groupby` per pair of depths;
+  `aggregation: { batch: true }` sends them in one `$batch`, and `aggregation: { compute: true }`
+  computes intervals with `compute`. `RestAdapter` with `pivot: { url }` posts the options as JSON
+  (`defaultPivotBody`) and reads the groups (`defaultReadPivot`). A pivot that needs memory (a
+  computed value, a custom measure, an interval the service cannot compute) loads the rows and groups
+  them in memory.
+- `countDistinct` summaries: the different values that are not empty, compared the way filters compare
+  them; on OData with `aggregation`, `countdistinct`.
+
 ## [0.1.0-beta.1] - 2026-11-14
 
 ### Added

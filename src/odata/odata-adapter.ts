@@ -10,10 +10,16 @@ import { absoluteUrl } from '../http/absolute-url';
 import { HttpAdapter } from '../http/http-adapter';
 import type { HttpRequest } from '../http/http-request';
 import type { HttpRequestInit } from '../http/http-request-init';
+import { queryString } from '../http/query-string';
 import { requestParams } from '../http/request-params';
+import type { FieldType } from '../query/field-type';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
-import { fieldTypeOf, isObject } from '../query/values';
+import { type PivotDepth, pivotDepths } from '../query/pivot';
+import type { PivotGroup } from '../query/pivot-group';
+import type { PivotLevel } from '../query/pivot-level';
+import type { PivotLoadOptions } from '../query/pivot-load-options';
+import { fieldTypeOf, getField, isObject } from '../query/values';
 import type { BatchRequestPart } from './batch-request-part';
 import type { BatchResponsePart } from './batch-response-part';
 import { readBatch, writeBatch } from './multipart-batch';
@@ -23,12 +29,15 @@ import { dayText, odataExpand, odataLiteral, odataPath } from './odata-syntax';
 
 // Sent with writes only: a read with no custom header needs no CORS preflight.
 const ODATA_HEADERS = { 'OData-Version': '4.0', 'OData-MaxVersion': '4.0' };
-const AGGREGATE = { count: '', sum: 'sum', min: 'min', max: 'max', avg: 'average' } as const;
+const AGGREGATE = { count: '', countDistinct: 'countdistinct', sum: 'sum', min: 'min', max: 'max', avg: 'average' } as const;
+
+/** A level a pivot request groups by, with the name its value has in the answer when it is computed. */
+type GroupedLevel<T> = { level: PivotLevel<T>; alias: string };
 
 /**
  * An OData v4 entity set. Filtering, sorting, paging, counting, `$select` and `$expand` run on the
- * service, summaries too with `aggregation`; updates and removes send the `@odata.etag` of the
- * `original` row as `If-Match`.
+ * service, summaries and pivots too with `aggregation`; updates and removes send the `@odata.etag`
+ * of the `original` row as `If-Match`.
  */
 export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends HttpAdapter<T, K> {
   private readonly odata: ODataAdapterOptions<T, K>;
@@ -44,8 +53,32 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
   }
 
   protected backendCapabilities(): Capabilities {
-    const summary = !!this.odata.aggregation;
-    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary, insert: true, update: true, remove: true };
+    const aggregation = !!this.odata.aggregation;
+    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary: aggregation, pivot: aggregation, insert: true, update: true, remove: true };
+  }
+
+  protected override pivotRemotely(options: PivotLoadOptions<T>): boolean {
+    const compute = this.aggregationOptions.compute === true;
+    const levels = [...(options.rows ?? []), ...(options.columns ?? [])];
+    return super.pivotRemotely(options) && levels.every((level) => level.interval === undefined || (compute && level.interval !== 'dayOfWeek'));
+  }
+
+  // One `$apply` per pair of depths of the axes, e.g. rows by year and country under 2024, columns at their total:
+  // `filter(…)/compute(year(OrderDate) as _r0)/filter(_r0 eq 2024)/groupby((_r0,ShipCountry),aggregate($count as _n,Freight with sum as _m0))`.
+  protected override async loadPivotGroups(options: PivotLoadOptions<T>): Promise<unknown> {
+    const pairs = withValidValues('load', () =>
+      pivotDepths(options.rows ?? [], options.expandedRows).flatMap((r) =>
+        pivotDepths(options.columns ?? [], options.expandedColumns).map((c) => ({ rows: r.depth, columns: c.depth, apply: this.pivotApply(options, r, c) })),
+      ),
+    );
+    const applies = pairs.map((p) => p.apply);
+    const read = async (apply: string) => (await this.send({ operation: 'load', method: 'GET', url: this.url, query: { $apply: apply, ...requestParams(options) }, signal: options.signal })).body;
+    const bodies = this.aggregationOptions.batch && applies.length > 1 ? await this.sendReads(applies, options) : await Promise.all(applies.map(read));
+    return bodies.flatMap((body, i) => {
+      const value = (body as { value?: unknown } | null)?.value;
+      if (!Array.isArray(value)) throw DataError.create('MJD104', { operation: 'load', details: body }, 'no "value" array');
+      return value.map((record: Record<string, unknown>) => this.pivotGroup(record, options, pairs[i].rows, pairs[i].columns));
+    });
   }
 
   protected async loadRows(options: LoadOptions): Promise<LoadResult<T>> {
@@ -225,8 +258,83 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     const row = (response.body as { value?: Record<string, unknown>[] } | null)?.value?.[0] ?? {};
     return items.map((item, i) => {
       const value = row[`s${i}`] ?? null;
-      if (item.type === 'count' || item.type === 'sum') return Number(value ?? 0);
+      if (item.type === 'count' || item.type === 'countDistinct' || item.type === 'sum') return Number(value ?? 0);
       return item.type === 'avg' && value !== null ? Number(value) : value;
+    });
+  }
+
+  private get aggregationOptions() {
+    return typeof this.odata.aggregation === 'object' ? this.odata.aggregation : {};
+  }
+
+  private pivotApply(o: PivotLoadOptions<T>, r: PivotDepth, c: PivotDepth): string {
+    const rows = (o.rows ?? []).slice(0, r.depth).map((level, i): GroupedLevel<T> => ({ level, alias: `_r${i}` }));
+    const columns = (o.columns ?? []).slice(0, c.depth).map((level, j): GroupedLevel<T> => ({ level, alias: `_c${j}` }));
+    const grouped = [...rows, ...columns];
+    const steps: string[] = [];
+    const filter = this.filterText({ filter: o.filter });
+    if (filter !== 'true') steps.push(`filter(${filter})`);
+    const computed = grouped.filter((g) => g.level.interval !== undefined);
+    if (computed.length) steps.push(`compute(${computed.map((g) => `${intervalText(g.level)} as ${g.alias}`).join(',')})`);
+    const under = [this.parentsText(rows, r.parents), this.parentsText(columns, c.parents)].filter((text) => text !== '');
+    if (under.length) steps.push(`filter(${under.length === 1 ? under[0] : under.map((text) => `(${text})`).join(' and ')})`);
+    const values = ['$count as _n'];
+    (o.measures ?? []).forEach((m, k) => {
+      if (m.type !== 'count' && m.type !== 'custom') values.push(`${odataPath(m.field!)} with ${AGGREGATE[m.type]} as _m${k}`);
+    });
+    const aggregate = `aggregate(${values.join(',')})`;
+    steps.push(grouped.length ? `groupby((${grouped.map((g) => groupedText(g)).join(',')}),${aggregate})` : aggregate);
+    return steps.join('/');
+  }
+
+  // `(_r0 eq 2024 and ShipCountry eq 'France') or (…)`: the rows under the members whose children a depth holds.
+  private parentsText(grouped: readonly GroupedLevel<T>[], parents: PivotDepth['parents']): string {
+    if (!parents) return '';
+    const one = (path: readonly unknown[]) => path.map((key, k) => `${groupedText(grouped[k])} eq ${odataLiteral(key, keyType(grouped[k].level, key, this.fields))}`).join(' and ');
+    return parents.length === 1 ? one(parents[0]) : parents.map((path) => `(${one(path)})`).join(' or ');
+  }
+
+  private pivotGroup(record: Record<string, unknown>, o: PivotLoadOptions<T>, rows: number, columns: number): PivotGroup {
+    const key = (g: GroupedLevel<T>) => (g.level.interval === undefined ? getField(record, g.level.field) : record[g.alias]);
+    return {
+      rows: (o.rows ?? []).slice(0, rows).map((level, i) => key({ level, alias: `_r${i}` })),
+      columns: (o.columns ?? []).slice(0, columns).map((level, j) => key({ level, alias: `_c${j}` })),
+      count: Number(record._n ?? 0),
+      values: (o.measures ?? []).map((m, k) => (m.type === 'count' ? record._n : (record[`_m${k}`] ?? null))),
+    };
+  }
+
+  // Reads in one `$batch`, answers in their order; one that failed fails them all.
+  private async sendReads(applies: readonly string[], options: PivotLoadOptions<T>): Promise<unknown[]> {
+    const url = (typeof this.odata.batch === 'object' ? this.odata.batch.url : undefined) ?? `${this.serviceRoot}$batch`;
+    const boundary = `batch_${randomText()}`;
+    const requests = applies.map((apply): BatchRequestPart => {
+      const query = new URLSearchParams({ $apply: apply });
+      for (const [name, value] of Object.entries(requestParams(options) ?? {})) if (value !== undefined && value !== null) query.set(name, String(value));
+      return { method: 'GET', url: absoluteUrl(`${this.url}?${queryString(query)}`), headers: { Accept: 'application/json' } };
+    });
+    const response = await this.send({
+      operation: 'load',
+      method: 'POST',
+      url,
+      headers: { ...ODATA_HEADERS, Accept: 'multipart/mixed', 'Content-Type': `multipart/mixed; boundary=${boundary}` },
+      body: writeBatch(requests, boundary),
+      signal: options.signal,
+    });
+    let answers: BatchResponsePart[];
+    try {
+      answers = readBatch(typeof response.body === 'string' ? response.body : '', response.headers.get('content-type') ?? '');
+    } catch (error) {
+      throw DataError.create('MJD104', { operation: 'load', details: response.body, cause: error }, (error as Error).message);
+    }
+    const byId = new Map(answers.filter((a) => a.contentId).map((a) => [a.contentId, a]));
+    return applies.map((_, i) => {
+      const answer = byId.get(String(i + 1)) ?? answers[i];
+      if (!answer) throw DataError.create('MJD104', { operation: 'load', details: response.body }, `no answer to read ${i + 1} of the batch`);
+      if (answer.status < 200 || answer.status >= 300) {
+        throw this.readError({ request: response.request, status: answer.status, statusText: answer.statusText, headers: answer.headers, body: answer.body, durationMs: 0 });
+      }
+      return answer.body;
     });
   }
 
@@ -286,4 +394,39 @@ function expandText(paths: readonly string[] | undefined): string | undefined {
 
 function randomText(): string {
   return Math.random().toString(36).slice(2, 12);
+}
+
+// A level with an interval is grouped by the name `compute` gave its value.
+function groupedText(g: GroupedLevel<any>): string {
+  return g.level.interval === undefined ? odataPath(g.level.field) : g.alias;
+}
+
+// Quarters with integer division; a range starts at `floor(value / width) * width`, the division taken in decimals.
+function intervalText(level: PivotLevel<any>): string {
+  const field = odataPath(level.field);
+  switch (level.interval) {
+    case 'year':
+      return `year(${field})`;
+    case 'quarter':
+      return `(month(${field}) add 2) div 3`;
+    case 'month':
+      return `month(${field})`;
+    case 'day':
+      return `day(${field})`;
+    case 'date':
+      return `date(${field})`;
+    case 'dayOfWeek':
+    case undefined:
+      throw new TypeError(`no OData function groups ${level.interval ?? 'without an interval'}`);
+    default: {
+      const width = String(level.interval);
+      return `floor(${field} div ${/[.e]/.test(width) ? width : `${width}.0`}) mul ${width}`;
+    }
+  }
+}
+
+function keyType(level: PivotLevel<any>, key: unknown, fields: Readonly<Record<string, FieldType>>): FieldType {
+  if (level.interval === 'date') return 'date';
+  if (level.interval !== undefined) return 'number';
+  return fields[level.field] ?? fieldTypeOf(key);
 }

@@ -1,5 +1,7 @@
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import type { PivotLevel } from '../query/pivot-level';
+import type { PivotLoadOptions } from '../query/pivot-load-options';
 
 export function defaultLoadQuery(options: LoadOptions): Record<string, string | number | boolean | undefined> {
   return {
@@ -23,6 +25,31 @@ export function defaultReadRows<T>(body: unknown, options: LoadOptions): LoadRes
   const rows = [b.rows, b.items, b.data, b.value].find(Array.isArray) as T[] | undefined;
   const total = [b.total, b.totalCount, b.count, b['@odata.count']].find((v) => typeof v === 'number') as number | undefined;
   return total === undefined ? { rows: rows ?? [] } : { rows: rows ?? [], total };
+}
+
+/**
+ * The body a pivot sends: `{ filter, rows, columns, measures, expandedRows, expandedColumns }`, the levels as
+ * `{ field, interval, dir }` and the measures as `{ type, field, skipEmpty }`, missing ones left out; the filter is
+ * `null` without one, the expanded members `true` for all.
+ */
+export function defaultPivotBody(options: PivotLoadOptions<any>): Record<string, unknown> {
+  const level = ({ field, interval, dir }: PivotLevel<any>) => ({ field, interval, dir });
+  return {
+    filter: options.filter ?? null,
+    rows: (options.rows ?? []).map(level),
+    columns: (options.columns ?? []).map(level),
+    measures: (options.measures ?? []).map((m) => ({ type: m.type, field: m.field, skipEmpty: m.type === 'custom' ? undefined : m.skipEmpty })),
+    expandedRows: options.expandedRows ?? true,
+    expandedColumns: options.expandedColumns ?? true,
+  };
+}
+
+/** The groups of a pivot's answer: the body when it is an array, or its `groups`. */
+export function defaultReadPivot(body: unknown): unknown[] {
+  if (Array.isArray(body)) return body;
+  const groups = (body as { groups?: unknown } | null)?.groups;
+  if (!Array.isArray(groups)) throw new TypeError('no "groups" array');
+  return groups;
 }
 
 export function defaultReadSaved<T>(body: unknown): Partial<T> | void {
