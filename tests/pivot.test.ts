@@ -78,6 +78,31 @@ describe('pivot in memory', () => {
     expect(p.rows.children!.map((m) => [m.key, m.count])).toEqual([[0, 3], [50, 1], [100, 1], [null, 1]]);
   });
 
+  it('keeps rows by their members on levels of their own: date parts, ranges, computed values, empty ones', () => {
+    const regions = (keep: data.PivotKeep<Sale>[]) => queryPivot(sales, { rows: [{ field: 'region' }], measures: [count], keep }, ctx).rows.children!.map((m) => [m.key, m.count]);
+    // 2024 whole, and the last quarter of 2023: a path names a member from the first interval down.
+    expect(regions([{ field: 'day', intervals: ['year', 'quarter'], paths: [[2024], [2023, 4]] }])).toEqual([
+      ['North', 2],
+      ['South', 3],
+    ]);
+    // January and February of any year, left out.
+    expect(regions([{ field: 'day', intervals: ['month'], paths: [[1], [2]], type: 'exclude' }])).toEqual([
+      ['North', 1],
+      ['South', 2],
+      [null, 1],
+    ]);
+    // Ranges of 50 from 0, and the empty amount.
+    expect(regions([{ field: 'amount', intervals: [50], paths: [[0], [null]] }])).toEqual([
+      ['South', 3],
+      [null, 1],
+    ]);
+    expect(regions([{ field: 'big', value: (s) => (s.amount ?? 0) > 40, paths: [[true]] }])).toEqual([['North', 2]]);
+    // Text is told apart without case; every entry applies.
+    expect(regions([{ field: 'region', paths: [['NORTH']] }])).toEqual([['North', 2]]);
+    expect(regions([{ field: 'region', paths: [[null]], type: 'exclude' }, { field: 'city', paths: [['Rome']] }])).toEqual([['South', 2]]);
+    expect(regions([{ field: 'region', paths: [] }])).toEqual([]);
+  });
+
   it('counts distinct values, finds the smallest and largest, and runs measures and levels of their own', () => {
     const median = {
       type: 'custom' as const,
@@ -184,6 +209,18 @@ describe('loadPivot', () => {
     ];
     for (const options of bad) await expect(a.loadPivot(options)).rejects.toMatchObject({ code: 'MJD302' });
     expect(errors).toEqual(bad.map(() => 'MJD302'));
+  });
+
+  it('keeps members in memory, and rejects a keep it cannot read', async () => {
+    const adapter = new ArrayAdapter<Sale, number>({ data: sales, key: 'id', fields: { day: 'date' }, locale: 'en-US' });
+    const p = await adapter.loadPivot({ rows: [{ field: 'region' }], measures: [count], keep: [{ field: 'day', intervals: ['year'], paths: [[2024]] }] });
+    // A member's key is its value in the first row kept.
+    expect(p.rows.children!.map((m) => [m.key, m.count])).toEqual([
+      ['north', 1],
+      ['South', 2],
+    ]);
+    await expect(adapter.loadPivot({ keep: [{ field: 'day', intervals: ['week' as data.PivotInterval], paths: [] }] })).rejects.toMatchObject({ code: 'MJD302' });
+    await expect(adapter.loadPivot({ keep: [{ field: 'day', paths: [2024] as never }] })).rejects.toMatchObject({ code: 'MJD302' });
   });
 
   it('runs on the query of a data source', async () => {

@@ -26,6 +26,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   them in memory.
 - `countDistinct` summaries: the different values that are not empty, compared the way filters compare
   them; on OData with `aggregation`, `countdistinct`.
+- Pivots keep rows by their members (`keep`): a field read through intervals of its own (date parts, ranges of
+  numbers) or a computed value, the paths of the members kept or left out, `null` for empty values, the field on
+  an axis or not. OData filters with its date functions, without `compute`; REST gets `keep` in the body; a keep by
+  the day of the week or by a computed value runs in memory.
 - The demo has a Pivot tab: 100,000 orders by city and customer down, quarter and month across, with
   four measures, members that open and close and a filter; and TripPin's people counted with `$apply`, in
   one `$batch` or not, checked against the memory engine. In Chrome on a desktop machine the first pivot

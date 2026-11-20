@@ -13,10 +13,12 @@ import type { HttpRequestInit } from '../http/http-request-init';
 import { queryString } from '../http/query-string';
 import { requestParams } from '../http/request-params';
 import type { FieldType } from '../query/field-type';
+import { or, where } from '../query/filter-builders';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
 import { type PivotDepth, pivotDepths } from '../query/pivot';
 import type { PivotGroup } from '../query/pivot-group';
+import type { PivotKeep } from '../query/pivot-keep';
 import type { PivotLevel } from '../query/pivot-level';
 import type { PivotLoadOptions } from '../query/pivot-load-options';
 import { fieldTypeOf, getField, isObject } from '../query/values';
@@ -60,7 +62,9 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
   protected override pivotRemotely(options: PivotLoadOptions<T>): boolean {
     const compute = this.aggregationOptions.compute === true;
     const levels = [...(options.rows ?? []), ...(options.columns ?? [])];
-    return super.pivotRemotely(options) && levels.every((level) => level.interval === undefined || (compute && level.interval !== 'dayOfWeek'));
+    // A kept member is told by OData's date functions in a filter, without `compute`; no function tells the day of the week.
+    const keep = (options.keep ?? []).every((k) => !(k.intervals ?? []).includes('dayOfWeek'));
+    return super.pivotRemotely(options) && keep && levels.every((level) => level.interval === undefined || (compute && level.interval !== 'dayOfWeek'));
   }
 
   // One `$apply` per pair of depths of the axes, e.g. rows by year and country under 2024, columns at their total:
@@ -274,6 +278,8 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     const steps: string[] = [];
     const filter = this.filterText({ filter: o.filter });
     if (filter !== 'true') steps.push(`filter(${filter})`);
+    const kept = (o.keep ?? []).map((k) => this.keepText(k));
+    if (kept.length) steps.push(`filter(${kept.length === 1 ? kept[0] : kept.map((text) => `(${text})`).join(' and ')})`);
     const computed = grouped.filter((g) => g.level.interval !== undefined);
     if (computed.length) steps.push(`compute(${computed.map((g) => `${intervalText(g.level)} as ${g.alias}`).join(',')})`);
     const under = [this.parentsText(rows, r.parents), this.parentsText(columns, c.parents)].filter((text) => text !== '');
@@ -285,6 +291,31 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     const aggregate = `aggregate(${values.join(',')})`;
     steps.push(grouped.length ? `groupby((${grouped.map((g) => groupedText(g)).join(',')}),${aggregate})` : aggregate);
     return steps.join('/');
+  }
+
+  // `(year(OrderDate) eq 2024 and (month(OrderDate) add 2) div 3 eq 2) or (…)`, or `not (…)`: the rows `keep` keeps. Without
+  // intervals the keys are compared as a filter compares them (case, collections).
+  private keepText(keep: PivotKeep<T>): string {
+    const intervals = keep.intervals ?? [];
+    let any: string;
+    if (!keep.paths.length) any = 'false';
+    else if (!intervals.length) {
+      const keys = keep.paths.filter((path) => path.length === 1).map((path) => path[0]);
+      const given = keys.filter((key) => key !== null && key !== undefined);
+      const one = (key: unknown) => where(keep.field, '=', key);
+      any = this.filterText({ filter: or(...given.map(one), given.length < keys.length ? where(keep.field, 'isblank') : null) });
+      if (any === 'true') any = 'false';
+    } else {
+      const levels = intervals.map((interval): PivotLevel<T> => ({ field: keep.field, interval }));
+      const one = (path: readonly unknown[]) =>
+        path
+          .slice(0, levels.length)
+          .map((key, k) => (key === null || key === undefined ? `${odataPath(keep.field)} eq null` : `${intervalText(levels[k])} eq ${odataLiteral(key, keyType(levels[k], key, this.fields))}`))
+          .join(' and ');
+      const paths = keep.paths.filter((path) => path.length);
+      any = paths.length === 1 ? one(paths[0]) : paths.map((path) => `(${one(path)})`).join(' or ');
+    }
+    return keep.type === 'exclude' ? `not (${any})` : any;
   }
 
   // `(_r0 eq 2024 and ShipCountry eq 'France') or (…)`: the rows under the members whose children a depth holds.

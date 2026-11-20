@@ -90,6 +90,7 @@ export type { PivotDepth } from './query/pivot';
 export type { PivotCustomMeasure } from './query/pivot-custom-measure';
 export type { PivotGroup } from './query/pivot-group';
 export type { PivotInterval } from './query/pivot-interval';
+export type { PivotKeep } from './query/pivot-keep';
 export type { PivotLevel } from './query/pivot-level';
 export type { PivotLoadOptions } from './query/pivot-load-options';
 export type { PivotLoadResult } from './query/pivot-load-result';

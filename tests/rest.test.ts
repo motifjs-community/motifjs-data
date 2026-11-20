@@ -253,6 +253,7 @@ describe('RestAdapter pivots', () => {
     expect([api.calls.length, call.method, call.url.pathname, call.url.searchParams.get('tenant')]).toEqual([1, 'POST', '/api/orders/pivot', 'a']);
     expect(call.body).toEqual({
       filter: { field: 'amount', op: '<', value: 100 },
+      keep: [],
       rows: [{ field: 'customer', dir: 'desc' }],
       columns: [],
       measures: [{ type: 'sum', field: 'amount' }],

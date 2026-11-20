@@ -110,9 +110,12 @@ level's `interval` groups dates by `'year'`, `'quarter'`, `'month'`, `'day'`, `'
 `'date'` (local time) and numbers by ranges of a width (`100`: 0, 100, 200 …). Totals come from their
 rows, so the average of a total is the average of its rows. A level or a measure can read a value of
 its own (`value: (row) => …`), and `{ type: 'custom', start, add, result }` is a measure of your own;
-both run in memory only. A backend that computes pivots (`capabilities.pivot`: OData with
-`aggregation`, REST with `pivot`) is asked for the groups (`PivotGroup`); otherwise the matching rows
-are loaded and `queryPivot` groups them in memory.
+both run in memory only. `keep` keeps rows by their members on levels of its own, read the way the axes
+read them, whether the field is on an axis or not: `{ field: 'OrderDate', intervals: ['year', 'quarter'],
+paths: [[1997], [1998, 1]] }` keeps 1997 and the first quarter of 1998, `type: 'exclude'` every row but
+those, and `null` in a path stands for empty values. A backend that computes pivots (`capabilities.pivot`:
+OData with `aggregation`, REST with `pivot`) is asked for the groups (`PivotGroup`); otherwise the matching
+rows are loaded and `queryPivot` groups them in memory.
 
 **Filters are plain data:** `data.where(field, op, value)` joined with `data.and`, `data.or`, `data.not`. Operators: `=`
 `<>` `<` `<=` `>` `>=` `contains` `notcontains` `startswith` `endswith` `between` `in` `notin`
@@ -296,6 +299,7 @@ header), `readSaved`; give `batch` for an endpoint that takes many changes in on
 ```json
 {
   "filter": { "field": "Freight", "op": ">", "value": 5 },
+  "keep": [{ "field": "OrderDate", "intervals": ["year"], "paths": [[1997]], "type": "include" }],
   "rows": [{ "field": "ShipCountry" }, { "field": "ShipCity" }],
   "columns": [{ "field": "OrderDate", "interval": "year" }],
   "measures": [{ "type": "sum", "field": "Freight" }, { "type": "count" }],
@@ -309,7 +313,8 @@ row levels) and every column depth, the rows grouped by the levels down to those
 `{ "rows": ["France"], "columns": [1997], "count": 12, "values": [340.5, 12] }`. A depth of 0 is the
 total of its axis. From depth 2 a group is sent only under a member that is expanded and shown itself:
 here the cities of France only. `method`, `write` and `read` change the request and how the answer is
-read. Computed values and custom measures cannot be sent: such a pivot is grouped in memory.
+read. `keep` lists the members kept, each a path of keys through the field's `intervals`. Computed
+values and custom measures cannot be sent: such a pivot is grouped in memory.
 
 ## ODataAdapter
 
@@ -347,7 +352,9 @@ Pivots too: one `groupby` per pair of depths of their axes, under the expanded m
 `aggregation: { batch: true }` sends those reads in one `$batch` request. A level with an interval needs
 `aggregation: { compute: true }`, a service that takes `compute` (`year()`, `month()`, `day()`,
 `date()`, `floor()`; dates by the service's clock), or it is grouped in memory; `'dayOfWeek'` has no
-OData function and is always grouped in memory.
+OData function and is always grouped in memory. `keep` becomes a `filter` with the same functions, which
+needs no `compute`: `filter(year(OrderDate) eq 1997)`; a `keep` by the day of the week, or by a computed
+value, keeps its rows in memory.
 
 Reads send no custom header, so a browser sends them without a CORS preflight; `OData-Version` and
 `OData-MaxVersion` go with writes. When the service answers in pages, `@odata.nextLink` is followed until

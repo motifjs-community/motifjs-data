@@ -338,7 +338,8 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
   /** Whether the backend can compute this pivot; computed values and custom measures need memory. */
   protected pivotRemotely(options: PivotLoadOptions<T>): boolean {
     const levels = [...(options.rows ?? []), ...(options.columns ?? [])];
-    return !levels.some((level) => level.value) && !(options.measures ?? []).some((measure) => measure.type === 'custom' || measure.value);
+    const read = !levels.some((level) => level.value) && !(options.keep ?? []).some((keep) => keep.value);
+    return read && !(options.measures ?? []).some((measure) => measure.type === 'custom' || measure.value);
   }
 
   protected applyPushedChanges(_changes: readonly PushedChange<T, K>[]): void {}
@@ -437,6 +438,18 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
         !!l && typeof l.field === 'string' && isPivotInterval(l.interval) && (l.dir === undefined || l.dir === 'asc' || l.dir === 'desc') && (l.value === undefined || typeof l.value === 'function');
       if (!Array.isArray(levels) || !levels.every(level)) throw invalid(`${name} items are { field, interval?, dir?: "asc" | "desc", value? }`);
       out[name] = levels.map((l) => ({ ...l }));
+    }
+    if (o.keep) {
+      const keep = (k: (typeof o.keep)[number]) =>
+        !!k &&
+        typeof k.field === 'string' &&
+        (k.intervals === undefined || (Array.isArray(k.intervals) && k.intervals.every((i) => i !== undefined && isPivotInterval(i)))) &&
+        (k.value === undefined || typeof k.value === 'function') &&
+        Array.isArray(k.paths) &&
+        k.paths.every(Array.isArray) &&
+        (k.type === undefined || k.type === 'include' || k.type === 'exclude');
+      if (!Array.isArray(o.keep) || !o.keep.every(keep)) throw invalid('keep items are { field, intervals?, value?, paths: arrays of keys, type?: "include" | "exclude" }');
+      out.keep = o.keep.map((k) => ({ ...k, paths: k.paths.map((path: readonly unknown[]) => [...path]) }));
     }
     if (o.measures) {
       const measure = (m: (typeof o.measures)[number]) => {

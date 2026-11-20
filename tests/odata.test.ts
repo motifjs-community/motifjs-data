@@ -452,6 +452,30 @@ describe('ODataAdapter pivots', () => {
     expect(sales$(service, undefined).capabilities.pivot).toBe(false);
   });
 
+  it('keeps members with a filter of date functions, and in memory where no function tells them', async () => {
+    const service = serviceOf({});
+    const adapter = sales$(service, true);
+    const keep: data.PivotKeep<Sale>[] = [
+      { field: 'day', intervals: ['year', 'quarter'], paths: [[2024], [2023, 2]] },
+      { field: 'amount', intervals: [25], paths: [[0], [null]], type: 'exclude' },
+    ];
+    await adapter.loadPivot({ rows: [{ field: 'region' }], measures: [{ type: 'count' }], keep });
+    expect(service.calls[0].query.$apply).toBe(
+      'filter(((year(day) eq 2024) or (year(day) eq 2023 and (month(day) add 2) div 3 eq 2)) and (not ((floor(amount div 25.0) mul 25 eq 0) or (amount eq null))))/aggregate($count as _n)',
+    );
+    // Without intervals, keys are compared as a filter compares them.
+    service.calls.length = 0;
+    await adapter.loadPivot({ measures: [{ type: 'count' }], keep: [{ field: 'region', paths: [['North'], [null]] }] });
+    expect(service.calls[0].query.$apply).toBe(`filter(${data.toODataFilter(data.or(data.where('region', '=', 'North'), data.where('region', 'isblank'))!)})/aggregate($count as _n)`);
+    // No OData function tells the day of the week, nor reads a computed value: the rows are kept in memory.
+    service.calls.length = 0;
+    const weekday = await adapter.loadPivot({ rows: [{ field: 'region' }], measures: [{ type: 'count' }], keep: [{ field: 'day', intervals: ['dayOfWeek'], paths: [[6]] }] });
+    const computed = await adapter.loadPivot({ rows: [{ field: 'region' }], measures: [{ type: 'count' }], keep: [{ field: 'big', value: (s) => s.amount > 15, paths: [[true]] }] });
+    expect(service.calls.every((c) => c.query.$apply === undefined)).toBe(true);
+    // Saturday: 3 February 2024, in Bergen.
+    expect([keys(weekday.rows), keys(computed.rows)]).toEqual([['North'], ['North', 'South']]);
+  });
+
   it('sends its reads in one $batch with aggregation.batch, and fails with an answer that failed', async () => {
     const ok = (body: unknown, id: string) => httpPart('200 OK', { 'Content-Type': 'application/json' }, body, id);
     let second = ok({ value: [{ region: 'North', _n: 3 }] }, '2');

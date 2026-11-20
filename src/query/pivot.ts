@@ -2,6 +2,7 @@ import type { EvaluateContext } from './evaluate-context';
 import type { FieldType } from './field-type';
 import type { PivotGroup } from './pivot-group';
 import type { PivotInterval } from './pivot-interval';
+import type { PivotKeep } from './pivot-keep';
 import type { PivotLevel } from './pivot-level';
 import type { PivotLoadOptions } from './pivot-load-options';
 import type { PivotLoadResult } from './pivot-load-result';
@@ -29,12 +30,13 @@ export function isPivotInterval(value: unknown): value is PivotInterval | undefi
 }
 
 /**
- * The groups of a pivot over rows in memory (see `PivotGroup`): the rows `filter` passes, each counted in every crossing
- * of the members it is shown in, totals included. Values group the way grouping groups them: text without case in the
- * locale, declared dates by day; a member's key is its value in the first row that has it.
+ * The groups of a pivot over rows in memory (see `PivotGroup`): the rows `filter` passes and `keep` keeps, each counted
+ * in every crossing of the members it is shown in, totals included. Values group the way grouping groups them: text
+ * without case in the locale, declared dates by day; a member's key is its value in the first row that has it.
  */
 export function pivotGroups<T>(rows: readonly T[], options: PivotLoadOptions<T>, ctx: EvaluateContext = {}): PivotGroup[] {
   const pass = options.filter ? createRowFilter<T>(options.filter, ctx) : null;
+  const keepers = (options.keep ?? []).map((keep) => keeper(keep, ctx));
   const rowAxis = new PivotAxis<T>(options.rows ?? [], ctx, options.expandedRows);
   const columnAxis = new PivotAxis<T>(options.columns ?? [], ctx, options.expandedColumns);
   const rules = (options.measures ?? []).map((measure) => measureRule(measure, ctx));
@@ -45,6 +47,7 @@ export function pivotGroups<T>(rows: readonly T[], options: PivotLoadOptions<T>,
   const values: unknown[] = new Array(rules.length);
   for (const row of rows) {
     if (pass && !pass(row)) continue;
+    if (keepers.length && !keepers.every((kept) => kept(row))) continue;
     const acrossCount = rowAxis.shown(row, across);
     const downCount = columnAxis.shown(row, down);
     // Each measure reads the row once for all its crossings.
@@ -165,6 +168,15 @@ export function intervalValue(value: unknown, interval: PivotInterval | undefine
   }
 }
 
+/** Whether a row is kept by `keep`: its member on one of the levels the intervals make is one of the paths. */
+function keeper<T>(keep: PivotKeep<T>, ctx: EvaluateContext): (row: T) => boolean {
+  const intervals: readonly (PivotInterval | undefined)[] = keep.intervals?.length ? keep.intervals : [undefined];
+  const axis = new PivotAxis<T>(intervals.map((interval) => ({ field: keep.field, interval, value: keep.value })), ctx);
+  const ids = new Set(keep.paths.filter((path) => path.length && path.length <= intervals.length).map((path) => axis.idOf(path)));
+  const include = keep.type !== 'exclude';
+  return (row) => axis.holds(row, ids) === include;
+}
+
 /** Memory: a member of an axis while rows are grouped. */
 interface MemberNode {
   /** The member's number in its axis; the root is 0. */
@@ -200,10 +212,22 @@ class PivotAxis<T> {
     this.own = levels.map((level) => !!(level.value ?? ctx.groupValue?.(level.field)));
     this.readers = levels.map((level) => level.value ?? (ctx.groupValue?.(level.field) as ((row: T) => unknown) | undefined) ?? ((row: T) => getField(row, level.field)));
     this.comparables = levels.map(() => new Map());
-    this.expanded =
-      expanded === undefined || expanded === true
-        ? true
-        : new Set(expanded.map((path) => path.reduce<string>((id, key, i) => (i < levels.length ? `${id}\u0001${partOf(this.comparable(i, key))}` : id), '')));
+    this.expanded = expanded === undefined || expanded === true ? true : new Set(expanded.map((path) => this.idOf(path)));
+  }
+
+  /** A path as an id: the comparable values of its keys, so a key matches the members it is told apart from. */
+  idOf(path: readonly unknown[]): string {
+    return path.reduce<string>((id, key, i) => (i < this.levels.length ? `${id}\u0001${partOf(this.comparable(i, key))}` : id), '');
+  }
+
+  /** Whether a row's member on some level (its path down to it) is one of `ids`. */
+  holds(row: T, ids: ReadonlySet<string>): boolean {
+    let id = '';
+    for (let i = 0; i < this.levels.length; i++) {
+      id += `\u0001${partOf(this.knownComparable(i, intervalValue(this.readers[i](row), this.levels[i].interval)))}`;
+      if (ids.has(id)) return true;
+    }
+    return false;
   }
 
   /** Memory: the members a row is shown in, the root first, written into `out`; returns their number. */
