@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] - 2026-11-22
+
 ### Added
 
 - Pivots: `loadPivot(options)` on every adapter and on `DataSource` (over its query) groups the rows by
