@@ -130,19 +130,21 @@ export function pivotDepths(levels: readonly PivotLevel<any>[], expanded: true |
 /**
  * A group as a backend sent it, read the way memory gives it: keys of date parts and ranges as numbers, of `'date'` and
  * of declared dates as `Date`s, of declared numbers as numbers; `count`, `countDistinct` and `sum` as numbers, `avg`
- * as a number or `null`. Throws a `TypeError` for what is no group.
+ * as a number or `null`; running totals as numbers or `null`. Throws a `TypeError` for what is no group.
  */
 export function readPivotGroup(group: unknown, options: PivotLoadOptions<any>, fields: Readonly<Record<string, FieldType>> = {}): PivotGroup {
   const g = group as Partial<PivotGroup> | null;
   if (!g || typeof g !== 'object' || !Array.isArray(g.rows) || !Array.isArray(g.columns)) throw new TypeError('a pivot group is { rows, columns, count, values }');
   const keys = (levels: readonly PivotLevel<any>[]) => (key: unknown, i: number) => readKey(key, levels[i], fields);
   const values = Array.isArray(g.values) ? g.values : [];
-  return {
+  const out: PivotGroup = {
     rows: g.rows.map(keys(options.rows ?? [])),
     columns: g.columns.map(keys(options.columns ?? [])),
     count: Number(g.count ?? 0),
     values: (options.measures ?? []).map((measure, i) => readValue(values[i] ?? null, measure)),
   };
+  if (Array.isArray(g.running)) out.running = g.running.map((v) => (v === null || v === undefined ? null : Number(v)));
+  return out;
 }
 
 /** The value of a level's interval; `null` for an empty value or one the interval cannot read. */

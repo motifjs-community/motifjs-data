@@ -6,6 +6,7 @@ import type { PivotLevel } from '../query/pivot-level';
 import type { PivotLoadOptions } from '../query/pivot-load-options';
 import type { PivotMeasure } from '../query/pivot-measure';
 import type { PivotMembersOptions } from '../query/pivot-members-options';
+import type { PivotSummarySort } from '../query/pivot-summary-sort';
 import type { RestPivotPart, RestPivotPartOptions } from './rest-pivot-part';
 
 export function defaultLoadQuery(options: LoadOptions): Record<string, string | number | boolean | undefined> {
@@ -55,7 +56,7 @@ export function defaultPivotBody(options: PivotLoadOptions<any>): Record<string,
  * The body of a part of a pivot, `kind` first, the levels, measures and members kept as `defaultPivotBody` writes them:
  * `{ kind: 'members', filter, keep, levels, slices: [{ parent, skip, take }], measures, sortBySummary, childCounts }`,
  * `{ kind: 'counts', filter, keep, levels, paths }` or `{ kind: 'cells', filter, keep, rows, columns, measures, rowPaths,
- * columnPaths }`.
+ * columnPaths }`, with `running: [{ measure, axis, orders }]` where running totals are asked for.
  */
 export function defaultPivotPartBody(kind: RestPivotPart, options: RestPivotPartOptions<any>): Record<string, unknown> {
   const level = ({ field, interval, dir }: PivotLevel<any>) => ({ field, interval, dir });
@@ -80,7 +81,12 @@ export function defaultPivotPartBody(kind: RestPivotPart, options: RestPivotPart
     return { ...base, levels: o.levels.map(level), paths: o.paths };
   }
   const o = options as PivotCellsOptions<any>;
-  return { ...base, rows: o.rows.map(level), columns: o.columns.map(level), measures: o.measures.map(measure), rowPaths: o.rowPaths, columnPaths: o.columnPaths };
+  const cells: Record<string, unknown> = { ...base, rows: o.rows.map(level), columns: o.columns.map(level), measures: o.measures.map(measure), rowPaths: o.rowPaths, columnPaths: o.columnPaths };
+  if (o.running?.length) {
+    const sortOf = (sort: PivotSummarySort<any> | null) => (sort ? { measure: sort.measure, levels: (sort.levels ?? []).map(level), path: sort.path ?? [] } : null);
+    cells.running = o.running.map((r) => ({ measure: r.measure, axis: r.axis, orders: (r.orders ?? []).map(sortOf) }));
+  }
+  return cells;
 }
 
 /** A part's answer: the body for members (`{ slices }`) and counts (`{ counts }`); for cells the body when it is an array, or its `groups`. */

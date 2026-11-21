@@ -12,4 +12,6 @@ export interface PivotGroup {
   columns: readonly unknown[];
   count: number;
   values: readonly unknown[];
+  /** For `loadPivotCells` with `running`: the running totals of the crossing, one per running total, `null` for none. */
+  running?: readonly unknown[];
 }

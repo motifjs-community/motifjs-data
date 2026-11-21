@@ -7,6 +7,8 @@ import type { PivotLevel } from '../query/pivot-level';
 import type { PivotLoadOptions } from '../query/pivot-load-options';
 import type { PivotMeasure } from '../query/pivot-measure';
 import type { PivotMembersOptions } from '../query/pivot-members-options';
+import type { PivotRunningTotal } from '../query/pivot-running-total';
+import type { PivotSummarySort } from '../query/pivot-summary-sort';
 
 /** The summary types a backend and memory compute. */
 export const SUMMARY_TYPES = new Set(['count', 'countDistinct', 'sum', 'min', 'max', 'avg']);
@@ -43,14 +45,7 @@ export function checkMembersOptions<T>(o: PivotMembersOptions<T>, invalid: Inval
   out.slices = o.slices.map((s) => ({ ...s, parent: [...s.parent] }));
   if (o.keep) out.keep = checkKeep(o.keep, invalid);
   if (o.measures) out.measures = checkMeasures(o.measures, invalid);
-  if (o.sortBySummary) {
-    const sort = o.sortBySummary;
-    const levels = sort.levels ? checkLevels(sort.levels, 'sortBySummary.levels', invalid) : [];
-    const path = sort.path ?? [];
-    if (!Number.isInteger(sort.measure) || sort.measure < 0 || sort.measure >= (out.measures?.length ?? 0)) throw invalid('sortBySummary.measure is the place of one of measures');
-    if (!Array.isArray(path) || path.length > levels.length) throw invalid('sortBySummary.path is keys of sortBySummary.levels, from the top');
-    out.sortBySummary = { measure: sort.measure, levels, path: [...path] };
-  }
+  if (o.sortBySummary) out.sortBySummary = checkSummarySort(o.sortBySummary, 'sortBySummary', out.measures?.length ?? 0, invalid);
   if (o.find) {
     const depth = o.slices[0].parent.length + 1;
     if (!Array.isArray(o.find) || !o.find.every((path) => Array.isArray(path) && path.length === depth)) throw invalid(`find are members of the level asked for, ${depth} keys each`);
@@ -82,8 +77,26 @@ export function checkCellsOptions<T>(o: PivotCellsOptions<T>, invalid: Invalid):
   out.rowPaths = checkPaths(o.rowPaths, 'rowPaths', out.rows.length, invalid);
   out.columnPaths = checkPaths(o.columnPaths, 'columnPaths', out.columns.length, invalid);
   if (o.keep) out.keep = checkKeep(o.keep, invalid);
+  if (o.running) {
+    const measures = out.measures.length;
+    const one = (r: PivotRunningTotal<T>) => !!r && Number.isInteger(r.measure) && r.measure >= 0 && r.measure < measures && (r.axis === 'rows' || r.axis === 'columns') && (r.orders === undefined || Array.isArray(r.orders));
+    if (!Array.isArray(o.running) || !o.running.every(one)) throw invalid('running items are { measure: the place of one of measures, axis: "rows" | "columns", orders? }');
+    out.running = o.running.map((r, i) => ({
+      measure: r.measure,
+      axis: r.axis,
+      ...(r.orders ? { orders: r.orders.map((sort: PivotSummarySort<T> | null, k: number) => (sort ? checkSummarySort(sort, `running[${i}].orders[${k}]`, measures, invalid) : null)) } : {}),
+    }));
+  }
   if (o.expand) out.expand = [...o.expand];
   return out;
+}
+
+function checkSummarySort<T>(sort: PivotSummarySort<T>, name: string, measures: number, invalid: Invalid): PivotSummarySort<T> {
+  const levels = sort.levels ? checkLevels(sort.levels, `${name}.levels`, invalid) : [];
+  const path = sort.path ?? [];
+  if (!Number.isInteger(sort.measure) || sort.measure < 0 || sort.measure >= measures) throw invalid(`${name}.measure is the place of one of measures`);
+  if (!Array.isArray(path) || path.length > levels.length) throw invalid(`${name}.path is keys of ${name}.levels, from the top`);
+  return { measure: sort.measure, levels, path: [...path] };
 }
 
 function checkFilter(o: { filter?: unknown }, out: { filter?: unknown }, invalid: Invalid) {

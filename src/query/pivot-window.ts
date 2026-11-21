@@ -13,6 +13,7 @@ import type { PivotMembersResult } from './pivot-members-result';
 import type { PivotSliceMember } from './pivot-slice-member';
 import type { SummaryAccumulator } from './summaries';
 import { createRowFilter } from './row-filter';
+import { runningAsks, runningTotals } from './pivot-running';
 
 /**
  * The members `loadPivotMembers` asks for, over rows in memory: every child of each slice's parent is grouped and
@@ -131,17 +132,53 @@ export function pivotCells<T>(rows: readonly T[], options: PivotCellsOptions<T>,
   const done = new Map<string, { count: number; values: readonly unknown[] }>();
   for (const [id, cell] of cells) done.set(id, { count: cell.count, values: cell.sums.map((sum) => sum.result()) });
   const find = (rowPath: readonly unknown[], columnPath: readonly unknown[]) => done.get(`${rowAxis.idOf(rowPath)}\u0002${columnAxis.idOf(columnPath)}`);
-  return { values: (rowPath, columnPath) => find(rowPath, columnPath)?.values, count: (rowPath, columnPath) => find(rowPath, columnPath)?.count ?? 0 };
+  const own: PivotCellsResult = { values: (rowPath, columnPath) => find(rowPath, columnPath)?.values, count: (rowPath, columnPath) => find(rowPath, columnPath)?.count ?? 0 };
+  if (!options.running?.length) return own;
+  // Each parent's children in their order, and their values where they cross the others.
+  const read = runningAsks(options).map((ask) => {
+    const members = pivotMembers(rows, ask.members, ctx);
+    return { ask, members, cells: pivotCells(rows, ask.cells(members.slices[0]?.members.map((m) => m.path) ?? []), ctx) };
+  });
+  return { ...own, running: runningTotals(options, read, own, ctx) };
 }
 
-/** The crossings of groups a backend computed (see `PivotGroup`), found by the paths a request names them by. */
+/**
+ * The answer a backend gives to `loadPivotCells`, over rows in memory: the groups of the crossings asked for that some
+ * row falls in, and with `running` those no row falls in too (`count` 0), each with its running totals (`running`).
+ */
+export function pivotCellGroups<T>(rows: readonly T[], options: PivotCellsOptions<T>, ctx: EvaluateContext = {}): PivotGroup[] {
+  const r = pivotCells(rows, options, ctx);
+  const out: PivotGroup[] = [];
+  for (const rowPath of options.rowPaths) {
+    for (const columnPath of options.columnPaths) {
+      const count = r.count(rowPath, columnPath);
+      const running = r.running?.(rowPath, columnPath);
+      if (!count && !running) continue;
+      const group: PivotGroup = { rows: rowPath, columns: columnPath, count, values: r.values(rowPath, columnPath) ?? options.measures.map(() => null) };
+      if (running) group.running = running;
+      out.push(group);
+    }
+  }
+  return out;
+}
+
+/**
+ * The crossings of groups a backend computed (see `PivotGroup`), found by the paths a request names them by; with
+ * their running totals where the groups have them.
+ */
 export function pivotCellsResult<T>(groups: readonly PivotGroup[], options: PivotCellsOptions<T>, ctx: EvaluateContext = {}): PivotCellsResult {
   const rowAxis = new PivotAxis<T>(options.rows, ctx);
   const columnAxis = new PivotAxis<T>(options.columns, ctx);
   const byId = new Map<string, PivotGroup>();
   for (const group of groups) byId.set(`${rowAxis.idOf(group.rows)}\u0002${columnAxis.idOf(group.columns)}`, group);
   const find = (rowPath: readonly unknown[], columnPath: readonly unknown[]) => byId.get(`${rowAxis.idOf(rowPath)}\u0002${columnAxis.idOf(columnPath)}`);
-  return { values: (rowPath, columnPath) => find(rowPath, columnPath)?.values, count: (rowPath, columnPath) => find(rowPath, columnPath)?.count ?? 0 };
+  // A group no row falls in is there for its running totals only.
+  const out: PivotCellsResult = { values: (rowPath, columnPath) => (find(rowPath, columnPath)?.count ? find(rowPath, columnPath)!.values : undefined), count: (rowPath, columnPath) => find(rowPath, columnPath)?.count ?? 0 };
+  if (options.running?.length && groups.some((g) => Array.isArray(g.running))) {
+    const none = options.running.map(() => null);
+    out.running = (rowPath, columnPath) => find(rowPath, columnPath)?.running ?? none;
+  }
+  return out;
 }
 
 /**

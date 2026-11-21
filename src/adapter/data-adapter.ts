@@ -18,6 +18,7 @@ import type { PivotLoadOptions } from '../query/pivot-load-options';
 import type { PivotLoadResult } from '../query/pivot-load-result';
 import type { PivotMembersOptions } from '../query/pivot-members-options';
 import type { PivotMembersResult } from '../query/pivot-members-result';
+import { runningAsks, runningTotals } from '../query/pivot-running';
 import { pivotCells, pivotCellsResult, pivotCounts, pivotMembers, readPivotCounts, readPivotMembers } from '../query/pivot-window';
 import type { RowGroup } from '../query/row-group';
 import type { AdapterEvents } from './adapter-events';
@@ -193,8 +194,25 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
     );
   }
 
-  /** The measures where some row members and some column members cross (see `PivotCellsOptions`); computed as `loadPivotMembers` is. */
-  loadPivotCells(options: PivotCellsOptions<T>): Promise<PivotCellsResult> {
+  /**
+   * The measures where some row members and some column members cross (see `PivotCellsOptions`); computed as
+   * `loadPivotMembers` is. Running totals a backend does not give are added up here: each parent's children are read in
+   * their order, then their values.
+   */
+  async loadPivotCells(options: PivotCellsOptions<T>): Promise<PivotCellsResult> {
+    const result = await this.pivotCellsOf(options);
+    if (!options.running?.length || result.running) return result;
+    const read = await Promise.all(
+      runningAsks(options).map(async (ask) => {
+        const members = await this.loadPivotMembers(ask.members);
+        const cells = await this.pivotCellsOf(ask.cells(members.slices[0]?.members.map((m) => m.path) ?? []));
+        return { ask, members, cells };
+      }),
+    );
+    return { values: result.values, count: result.count, running: runningTotals(options, read, result, this.evaluateContext) };
+  }
+
+  private pivotCellsOf(options: PivotCellsOptions<T>): Promise<PivotCellsResult> {
     return this.pivotPart(
       options,
       checkCellsOptions,

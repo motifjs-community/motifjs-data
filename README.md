@@ -144,7 +144,10 @@ of all of them; `childCounts` counts each member's children too, and `find` give
 among their parent's children (`found`, -1 for none): where a view places a member shown open that the
 parts it loaded do not hold. `loadPivotCounts` gives the number of
 children of members, and `loadPivotCells` the measures of every row path with every column path, each
-member at its depth (`[]` is a total). Members are found by their keys the way members are told apart
+member at its depth (`[]` is a total); with `running` (`[{ measure, axis: 'rows', orders? }]`) also the running
+totals, `running(rowPath, columnPath)`: a measure added up over a member's siblings, in their order, up to it. A
+backend that gives no running totals has them added up by the adapter from each parent's children and their values.
+Members are found by their keys the way members are told apart
 (text without case, dates by day). A backend with `capabilities.pivotWindow` (OData with `aggregation`,
 REST with `pivot` unless `window: false`) computes them; otherwise the rows are loaded and grouped in
 memory, as for `loadPivot`. OData pages with `$orderby`, `$skip`, `$top` and `$count`, asks for the empty
@@ -368,10 +371,11 @@ a slice per slice asked, each member's values at the total of the other axis (an
 for the levels' own order, its `path` names a member of the other axis by its `levels`). `{ "kind": "counts", …, "levels", "paths" }` is answered with
 `{ "counts": [{ "path": ["France"], "count": 11 }] }`, the number of each member's children on the next
 level, and `{ "kind": "cells", …, "rows", "columns", "measures", "rowPaths", "columnPaths" }` with the
-groups of every row path and column path asked, as for a whole pivot. `writePart` and `readPart` change
-them. A server that holds the rows answers with the memory engine: `data.pivotGroups(rows, body)` for a
-whole pivot, `data.pivotMembers(rows, body)`, `data.pivotCounts(rows, body).childCount(path)` and
-`data.pivotCells(rows, body)` (`values` and `count` of a row path and a column path) for the parts.
+groups of every row path and column path asked, as for a whole pivot; a body with `running` may be answered
+with each group's `running` too (and the crossings no row falls in, `count` 0), or without them, which the
+adapter then adds up. `writePart` and `readPart` change them. A server that holds the rows answers with the
+memory engine: `data.pivotGroups(rows, body)` for a whole pivot, `data.pivotMembers(rows, body)`,
+`data.pivotCounts(rows, body).childCount(path)` and `data.pivotCellGroups(rows, body)` for the parts.
 
 ## ODataAdapter
 

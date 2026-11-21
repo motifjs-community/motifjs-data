@@ -44,6 +44,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   `pivotCells`), in the same order and with the same values as `queryPivot`. Over a million rows in Node on a desktop
   machine, the top members with the number of their children took about 0.7 s, a part of 100 of a member's 12,500
   children about 0.25 s, and the values of 100 members by 2 about 0.1 s.
+- Running totals with the cells of a pivot: `loadPivotCells` takes `running` (`PivotRunningTotal`: a measure added up
+  over a member's siblings on an axis, up to the member, in the order `loadPivotMembers` gives them, by a measure with
+  `orders`), and its result gives `running(rowPath, columnPath)`. Memory computes them; REST writes `running` in the
+  body and takes `running` from the groups of the answer; where a backend gives none (OData, an endpoint that does not
+  know them), the adapter reads each parent's children in their order and their values, and adds them up.
+  `pivotCellGroups(rows, body)` answers a cells request as a server does: the groups with their running totals, those
+  no row falls in among them (`count` 0).
 - Grouping in memory reads a date's part and a text's comparable form once per value, not once per row, finds a
   row's member by the row's value before working out how it compares, and orders members by forms worked out once;
   numbers of children are counted without grouping the children. A level of values all different keeps up to 262,144
