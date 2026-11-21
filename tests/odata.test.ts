@@ -647,3 +647,48 @@ describe('ODataAdapter pivot windows', () => {
     expect([service.calls.map((c) => c.query.$apply), weekdays.slices[0].total]).toEqual([[undefined], 3]);
   });
 });
+
+describe('ODataAdapter pivot member places', () => {
+  type Sale = { id: number; region: string | null; city: string; amount: number | null };
+  const sales$ = (service: ReturnType<typeof fakeService>) => new ODataAdapter<Sale, number>({ url: 'https://host/odata/Sales', key: 'id', locale: 'en-US', fetch: service.fetch, aggregation: true });
+  const serviceOf = (answers: Record<string, unknown>) =>
+    fakeService((call) => {
+      const key = [call.query.$apply, call.query.$orderby, call.query.$skip, call.query.$top].filter((part) => part !== undefined).join(' | ');
+      return json(answers[key] ?? { '@odata.count': 0, value: [] });
+    });
+  const sum = 'aggregate($count as _n,amount with sum as _m0)';
+
+  it('counts the members before each one in value order, the empty member last', async () => {
+    const listed = "filter(region eq 'North')/filter(city ne null)/groupby((region,city),aggregate($count as _n))";
+    const service = serviceOf({
+      [`${listed} | city asc | 0`]: { '@odata.count': 2, value: [] },
+      [`${listed} | 0`]: { '@odata.count': 2, value: [] },
+      [`${listed}/filter(city lt 'Oslo') | 0`]: { '@odata.count': 1, value: [] },
+      [`${listed}/filter(city eq 'Oslo') | 0`]: { '@odata.count': 1, value: [] },
+      [`${listed}/filter(city lt 'Lima') | 0`]: { '@odata.count': 1, value: [] },
+      "filter(region eq 'North')/filter(city eq null)/aggregate($count as _n)": { value: [{ _n: 1 }] },
+    });
+    const r = await sales$(service).loadPivotMembers({ levels: [{ field: 'region' }, { field: 'city' }], slices: [{ parent: ['North'], take: 0 }], find: [['North', 'Oslo'], ['North', 'Lima'], ['North', null]] });
+    expect([r.slices[0].total, r.found]).toEqual([3, [1, -1, 2]]);
+  });
+
+  it('places a member ordered by a measure: the groups before, then the members of its group before it, the empty member after its ties', async () => {
+    const listed = `filter(region ne null)/groupby((region),${sum})`;
+    const service = serviceOf({
+      [`${listed}/filter(_m0 gt 0) | 0`]: { '@odata.count': 2, value: [] },
+      [`filter(region eq null)/${sum}`]: { value: [{ _n: 1, _m0: 5 }] },
+      [`${listed}/filter(region eq 'South')`]: { value: [{ region: 'South', _n: 1, _m0: 20 }] },
+      [`${listed}/filter(_m0 gt 0)/filter(_m0 gt 20 or (_m0 eq 20 and region gt 'South')) | 0`]: { '@odata.count': 1, value: [] },
+      [`${listed}/filter(_m0 gt 0)/filter(_m0 gt 5 or (_m0 eq 5)) | 0`]: { '@odata.count': 2, value: [] },
+    });
+    const r = await sales$(service).loadPivotMembers({
+      levels: [{ field: 'region', dir: 'desc' }],
+      slices: [{ parent: [], take: 0 }],
+      measures: [{ type: 'sum', field: 'amount' }],
+      sortBySummary: { measure: 0 },
+      find: [['South'], [null], ['West']],
+    });
+    // North 40, South 20, the empty region 5: South after North, the empty region after both.
+    expect([r.slices[0].total, r.found]).toEqual([3, [1, 2, -1]]);
+  });
+});

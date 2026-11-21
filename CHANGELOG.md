@@ -33,7 +33,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   too, kept or left out with them (OData joins it with `or`).
 - Pivots in parts, for a view that loads as it scrolls and never the whole result: `loadPivotMembers` (a part of each
   slice's parent's children, in their order or by a measure at the other axis's total or in one of its members, with
-  the number of all of them and of their children), `loadPivotCounts` (the number of children of members) and
+  the number of all of them and of their children, and the places of members among them with `find`),
+  `loadPivotCounts` (the number of children of members) and
   `loadPivotCells` (the measures of the row and column members asked for, totals included), on every adapter and on
   `DataSource`. `capabilities.pivotWindow` says the backend computes them: OData with `aggregation` (paged with
   `$orderby`, `$skip`, `$top` and `$count`; the empty member apart; ordered by a measure in two rounds, the groups its

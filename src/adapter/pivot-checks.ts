@@ -51,6 +51,11 @@ export function checkMembersOptions<T>(o: PivotMembersOptions<T>, invalid: Inval
     if (!Array.isArray(path) || path.length > levels.length) throw invalid('sortBySummary.path is keys of sortBySummary.levels, from the top');
     out.sortBySummary = { measure: sort.measure, levels, path: [...path] };
   }
+  if (o.find) {
+    const depth = o.slices[0].parent.length + 1;
+    if (!Array.isArray(o.find) || !o.find.every((path) => Array.isArray(path) && path.length === depth)) throw invalid(`find are members of the level asked for, ${depth} keys each`);
+    out.find = o.find.map((path) => [...path]);
+  }
   if (o.expand) out.expand = [...o.expand];
   return out;
 }

@@ -72,6 +72,7 @@ export function defaultPivotPartBody(kind: RestPivotPart, options: RestPivotPart
       measures: (o.measures ?? []).map(measure),
       sortBySummary: sort ? { measure: sort.measure, levels: (sort.levels ?? []).map(level), path: sort.path ?? [] } : null,
       childCounts: !!o.childCounts,
+      find: o.find ?? [],
     };
   }
   if (kind === 'counts') {

@@ -57,6 +57,15 @@ describe('pivot windows in memory', () => {
     expect(at([2024], 'desc')).toEqual(['East', 'North', 'South', null]);
   });
 
+  it('finds the places of members among their parent children, as the slices order them', () => {
+    const find = [['South', 'Rome'], ['North', 'oslo'], ['North', 'Paris'], [null, 'Nowhere']];
+    const byName = pivotMembers(sales, { levels: [region, city], slices: [{ parent: ['South'], take: 0 }], find }, ctx);
+    expect(byName.found).toEqual([1, 1, -1, 0]);
+    const bySum = pivotMembers(sales, { levels: [region, { ...city, dir: 'desc' }], slices: [{ parent: ['South'], take: 0 }], measures: [sum], sortBySummary: { measure: 0 }, find }, ctx);
+    // South: Rome 30, Milan 10, desc; North: Oslo 100, Bergen 50.
+    expect(bySum.found).toEqual([0, 0, -1, 0]);
+  });
+
   it('counts the children of members on any level', () => {
     const r = pivotCounts(sales, { levels: [region, city, year], paths: [[], ['South'], ['South', 'Rome'], ['Nowhere land']] }, ctx);
     expect([r.childCount([]), r.childCount(['south']), r.childCount(['South', 'Rome']), r.childCount(['Nowhere land'])]).toEqual([4, 2, 1, 0]);

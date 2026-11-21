@@ -290,6 +290,7 @@ describe('RestAdapter pivots', () => {
       measures: [{ type: 'sum', field: 'amount' }],
       sortBySummary: null,
       childCounts: false,
+      find: [],
     });
     expect(members.slices[0].members.map((m) => [m.key, m.values, m.childCount])).toEqual([['c1', [10], 0]]);
     const counts = await adapter.loadPivotCounts({ levels: [{ field: 'customer' }], paths: [[]] });

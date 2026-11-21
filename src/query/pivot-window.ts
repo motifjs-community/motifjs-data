@@ -22,7 +22,8 @@ export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions
   const depth = options.slices[0]?.parent.length ?? 0;
   const levels = options.levels.slice(0, Math.min(depth + (options.childCounts ? 2 : 1), options.levels.length));
   const upper = new PivotAxis<T>(options.levels.slice(0, depth), ctx);
-  const parents = new Set(options.slices.map((slice) => upper.idOf(slice.parent)));
+  const find = options.find ?? [];
+  const parents = new Set([...options.slices.map((slice) => slice.parent), ...find.map((path) => path.slice(0, depth))].map((parent) => upper.idOf(parent)));
   const sort = options.sortBySummary;
   const path = sort?.path ?? [];
   const columns = (sort?.levels ?? []).slice(0, path.length);
@@ -34,24 +35,40 @@ export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions
   const at = memberAt(result.columns, path, new PivotAxis<T>(columns, ctx));
   const dir = options.levels[depth]?.dir;
   const measures = options.measures ?? [];
-  return {
-    slices: options.slices.map((slice) => {
-      const parent = memberAt(result.rows, slice.parent, axis);
-      let children = parent?.children ?? [];
+  const known = new Map<string, readonly PivotMember[]>();
+  const childrenOf = (path: readonly unknown[]) => {
+    const id = upper.idOf(path);
+    let children = known.get(id);
+    if (!children) {
+      children = memberAt(result.rows, path, axis)?.children ?? [];
       if (sort) children = bySummary(children, (m) => (at ? result.values(m, at)?.[sort.measure] : undefined), dir);
+      known.set(id, children);
+    }
+    return children;
+  };
+  const out: PivotMembersResult = {
+    slices: options.slices.map((slice) => {
+      const children = childrenOf(slice.parent);
       const skip = Math.max(0, slice.skip ?? 0);
       const part = slice.take === undefined ? children.slice(skip) : children.slice(skip, skip + Math.max(0, slice.take));
       return {
         parent: slice.parent,
         total: children.length,
         members: part.map((m) => {
-          const out: PivotSliceMember = { key: m.key, path: [...slice.parent, m.key], count: m.count, values: result.values(m, total) ?? measures.map(() => null) };
-          if (options.childCounts) out.childCount = m.children?.length ?? 0;
-          return out;
+          const one: PivotSliceMember = { key: m.key, path: [...slice.parent, m.key], count: m.count, values: result.values(m, total) ?? measures.map(() => null) };
+          if (options.childCounts) one.childCount = m.children?.length ?? 0;
+          return one;
         }),
       };
     }),
   };
+  if (find.length) {
+    out.found = find.map((path) => {
+      const id = axis.idOf(path);
+      return childrenOf(path.slice(0, depth)).findIndex((child) => axis.idOf(child.path) === id);
+    });
+  }
+  return out;
 }
 
 /** The numbers `loadPivotCounts` asks for, over rows in memory. */
@@ -144,7 +161,16 @@ export function readPivotMembers<T>(body: unknown, options: PivotMembersOptions<
       });
       return { parent, total: Number(slice.total ?? members.length), members };
     }),
+    ...foundOf(body, options),
   };
+}
+
+/** The places of the members `find` named, as an answer gives them (`found`, one per member). */
+function foundOf<T>(body: unknown, options: PivotMembersOptions<T>): { found?: number[] } {
+  if (!options.find?.length) return {};
+  const found = (body as { found?: unknown } | null)?.found;
+  if (!Array.isArray(found) || found.length !== options.find.length) throw new TypeError('a pivot members answer has "found", a place per member asked for');
+  return { found: found.map((at) => Number(at ?? -1)) };
 }
 
 /** The numbers of a backend's answer (`{ counts: [{ path, count }] }`), found by the paths the request names members by. */

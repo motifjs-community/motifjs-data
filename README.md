@@ -140,7 +140,9 @@ v.values(['France', 'BLONP'], [1997]);
 `loadPivotMembers` gives a part of each slice's parent's children, in `loadPivot`'s order (the level's
 `dir`, empty values last) or by a measure (`sortBySummary`: at the total of the other axis, or in one of
 its members by `levels` and `path`; members without a value last, ties in their order), with the number
-of all of them; `childCounts` counts each member's children too. `loadPivotCounts` gives the number of
+of all of them; `childCounts` counts each member's children too, and `find` gives the places of members
+among their parent's children (`found`, -1 for none): where a view places a member shown open that the
+parts it loaded do not hold. `loadPivotCounts` gives the number of
 children of members, and `loadPivotCells` the measures of every row path with every column path, each
 member at its depth (`[]` is a total). Members are found by their keys the way members are told apart
 (text without case, dates by day). A backend with `capabilities.pivotWindow` (OData with `aggregation`,
@@ -357,13 +359,13 @@ The same endpoint answers the parts a view loads as it scrolls, the body marked 
 ```json
 { "kind": "members", "filter": null, "keep": [], "levels": [{ "field": "ShipCountry" }, { "field": "CustomerID", "dir": "desc" }],
   "slices": [{ "parent": ["France"], "skip": 100, "take": 100 }], "measures": [{ "type": "sum", "field": "Freight" }],
-  "sortBySummary": { "measure": 0, "levels": [], "path": [] }, "childCounts": false }
+  "sortBySummary": { "measure": 0, "levels": [], "path": [] }, "childCounts": false, "find": [] }
 ```
 
 answered with `{ "slices": [{ "total": 11, "members": [{ "key": "BLONP", "count": 7, "values": [105.3] }] }] }`,
 a slice per slice asked, each member's values at the total of the other axis (and `childCount` with
-`childCounts`; `sortBySummary` is `null` for the levels' own order, its `path` names a member of the other
-axis by its `levels`). `{ "kind": "counts", …, "levels", "paths" }` is answered with
+`childCounts`, and `"found": [3, -1]` with the places of the members `find` names; `sortBySummary` is `null`
+for the levels' own order, its `path` names a member of the other axis by its `levels`). `{ "kind": "counts", …, "levels", "paths" }` is answered with
 `{ "counts": [{ "path": ["France"], "count": 11 }] }`, the number of each member's children on the next
 level, and `{ "kind": "cells", …, "rows", "columns", "measures", "rowPaths", "columnPaths" }` with the
 groups of every row path and column path asked, as for a whole pivot. `writePart` and `readPart` change

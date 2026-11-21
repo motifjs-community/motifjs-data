@@ -21,6 +21,11 @@ export interface PivotMembersOptions<T = unknown> {
   sortBySummary?: PivotSummarySort<T>;
   /** Also counts each member's children on the next level. */
   childCounts?: boolean;
+  /**
+   * Members of the level whose places among their parent's children are wanted, by their keys from the top: where a
+   * view places a member shown open that the parts it loaded do not hold.
+   */
+  find?: readonly (readonly unknown[])[];
   /** Related data the rows need when they are grouped in memory (OData `$expand`). */
   expand?: readonly string[];
   /** Passed to the backend as they are. */

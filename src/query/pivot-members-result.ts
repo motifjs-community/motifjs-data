@@ -4,4 +4,6 @@ import type { PivotSliceResult } from './pivot-slice-result';
 export interface PivotMembersResult {
   /** One per slice, in order. */
   slices: PivotSliceResult[];
+  /** The place of each member `find` named among its parent's children, in order; -1 for one with no rows. */
+  found?: number[];
 }

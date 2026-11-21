@@ -17,7 +17,7 @@ import { or, where } from '../query/filter-builders';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
 import type { FilterExpression } from '../query/filter-expression';
-import { type PivotDepth, pivotDepths, readValue } from '../query/pivot';
+import { PivotAxis, type PivotDepth, pivotDepths, readKey, readValue } from '../query/pivot';
 import type { PivotCellsOptions } from '../query/pivot-cells-options';
 import type { PivotCountsOptions } from '../query/pivot-counts-options';
 import type { PivotGroup } from '../query/pivot-group';
@@ -103,6 +103,108 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
   // and the empty member takes its place among them by its value. Ordered by a measure in a member of the other axis,
   // every member of the parent comes and they are ordered here.
   protected override async loadPivotMemberSlices(o: PivotMembersOptions<T>): Promise<unknown> {
+    const [answer, found] = await Promise.all([this.memberSlices(o), o.find?.length ? this.findPlaces(o) : undefined]);
+    return found ? { ...answer, found } : answer;
+  }
+
+  // The places of members among their parent's children, as the slices order them: in value order, the members before
+  // each counted on the service (the empty member is last); by a measure, its value first, then the members of its
+  // group before it, after the groups before; by a measure in a member of the other axis, from the parent's ordered list.
+  private async findPlaces(o: PivotMembersOptions<T>): Promise<number[]> {
+    const find = o.find!;
+    const depth = o.slices[0].parent.length;
+    const grouped = o.levels.slice(0, depth + 1).map((level, i): GroupedLevel<T> => ({ level, alias: `_r${i}` }));
+    const member = groupedText(grouped[depth]);
+    const measures = o.measures ?? [];
+    const values = valuesText(measures);
+    const dir = o.levels[depth].dir === 'desc' ? 'desc' : 'asc';
+    const groupby = `groupby((${grouped.map(groupedText).join(',')}),aggregate(${values}))`;
+    const sort = o.sortBySummary;
+    const ctx = this.evaluateContext;
+    const axis = new PivotAxis<T>(o.levels.slice(0, depth + 1), ctx);
+    const level = o.levels[depth];
+    const parentOf = (path: readonly unknown[]) => path.slice(0, depth);
+    const under = (parent: readonly unknown[]) => (parent.length ? [`filter(${this.pathText(grouped, parent)})`] : []);
+    const listedOf = (parent: readonly unknown[]) => [...this.partSteps(o, grouped), ...under(parent), `filter(${member} ne null)`, groupby].join('/');
+    const emptyOf = (parent: readonly unknown[]) => [...this.partSteps(o, grouped), ...under(parent), `filter(${member} eq null)`, `aggregate(${values})`].join('/');
+    const literal = (key: unknown) => odataLiteral(key, keyType(level, key, this.fields));
+    const isEmpty = (key: unknown) => key === null || key === undefined;
+    const counted = { $count: 'true', $top: '0' };
+    if (sort?.path?.length) {
+      const parents = [...new Map(find.map((path) => [axis.idOf(parentOf(path)), parentOf(path)])).values()];
+      const answer = await this.memberSlices({ ...o, slices: parents.map((parent) => ({ parent })), childCounts: false });
+      return find.map((path) => {
+        const at = parents.findIndex((parent) => axis.idOf(parent) === axis.idOf(parentOf(path)));
+        const id = axis.idOf(path);
+        return answer.slices[at].members.findIndex((m) => axis.idOf([...parentOf(path), readKey(m.key, level, this.fields)]) === id);
+      });
+    }
+    if (!sort) {
+      const before = dir === 'asc' ? 'lt' : 'gt';
+      const reads = find.flatMap((path) => {
+        const listed = listedOf(parentOf(path));
+        const key = path[depth];
+        if (isEmpty(key)) return [{ $apply: listed, ...counted }, { $apply: emptyOf(parentOf(path)) }];
+        return [
+          { $apply: `${listed}/filter(${member} ${before} ${literal(key)})`, ...counted },
+          { $apply: `${listed}/filter(${member} eq ${literal(key)})`, ...counted },
+        ];
+      });
+      const bodies = await this.readApplied(reads, o);
+      return find.map((path, i) => {
+        const there = isEmpty(path[depth]) ? Number(recordsOf(bodies[2 * i + 1])[0]?._n ?? 0) > 0 : countOf(bodies[2 * i + 1]) > 0;
+        return there ? countOf(bodies[2 * i]) : -1;
+      });
+    }
+    // By a measure: first the member's value, the groups' numbers and the empty member of each parent.
+    const groups = this.summaryGroups(measures, sort.measure, member, dir);
+    const measure = measures[sort.measure];
+    const sorted = measure.type === 'count' ? '_n' : `_m${sort.measure}`;
+    const valueOf = (record: Record<string, unknown> | undefined) => rankOf(readValue(recordValues(record ?? {}, measures)[sort.measure], measure));
+    const first: Record<string, string>[] = [];
+    const at = find.map((path) => {
+      const parent = parentOf(path);
+      const listed = listedOf(parent);
+      const n = first.length;
+      for (const g of groups) first.push({ $apply: g.filter ? `${listed}/filter(${g.filter})` : listed, ...counted });
+      first.push({ $apply: emptyOf(parent) });
+      first.push({ $apply: isEmpty(path[depth]) ? emptyOf(parent) : `${listed}/filter(${member} eq ${literal(path[depth])})` });
+      return n;
+    });
+    const firstBodies = await this.readApplied(first, o);
+    // Then the members of its group before it: by value, and on a tie by their order (the empty member after them all).
+    const second: Record<string, string>[] = [];
+    const plans = find.map((path, i) => {
+      const n = at[i];
+      const sizes = groups.map((_, g) => countOf(firstBodies[n + g]));
+      const blank = recordsOf(firstBodies[n + groups.length])[0];
+      const empty = blank && Number(blank._n ?? 0) > 0 ? valueOf(blank) : undefined;
+      const own = recordsOf(firstBodies[n + groups.length + 1])[0];
+      const key = path[depth];
+      const there = isEmpty(key) ? empty !== undefined : !!own && Number(own._n ?? 0) > 0;
+      if (!there) return null;
+      const v = isEmpty(key) ? (empty as number | null) : valueOf(own);
+      const home = this.summaryHome(groups, v);
+      const g = groups[home];
+      const listed = listedOf(parentOf(path));
+      const offset = sizes.slice(0, home).reduce((a, b) => a + b, 0);
+      // The empty member stands before a member of a group before, or of the same group with a better value.
+      const emptyHome = empty === undefined ? -1 : this.summaryHome(groups, empty);
+      const emptyBefore = !isEmpty(key) && empty !== undefined && (emptyHome < home || (emptyHome === home && g.byValue && empty !== v && summaryBefore(empty, v, dir)));
+      if (isEmpty(key) && !g.byValue) return { at: -1, base: offset + sizes[home] };
+      const better = dir === 'desc' ? 'gt' : 'lt';
+      const tie = isEmpty(key) ? `${sorted} eq ${v}` : `${sorted} eq ${v} and ${member} ${better} ${literal(key)}`;
+      const within = !g.byValue ? `${member} ${better} ${literal(key)}` : `${sorted} ${better} ${v} or (${tie})`;
+      const filters = [g.filter, within].filter((f): f is string => !!f).map((f) => `filter(${f})`);
+      second.push({ $apply: [listed, ...filters].join('/'), ...counted });
+      return { at: second.length - 1, base: offset + (emptyBefore ? 1 : 0) };
+    });
+    const secondBodies = second.length ? await this.readApplied(second, o) : [];
+    return plans.map((p) => (p === null ? -1 : p.base + (p.at < 0 ? 0 : countOf(secondBodies[p.at]))));
+  }
+
+  // The members of each slice, without `find`.
+  private async memberSlices(o: PivotMembersOptions<T>): Promise<{ slices: { total: number; members: Listed[] }[] }> {
     const depth = o.slices[0].parent.length;
     const grouped = o.levels.slice(0, depth + 1).map((level, i): GroupedLevel<T> => ({ level, alias: `_r${i}` }));
     const member = groupedText(grouped[depth]);
