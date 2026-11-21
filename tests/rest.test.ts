@@ -291,12 +291,21 @@ describe('RestAdapter pivots', () => {
       sortBySummary: null,
       childCounts: false,
       find: [],
+      nonEmpty: false,
     });
     expect(members.slices[0].members.map((m) => [m.key, m.values, m.childCount])).toEqual([['c1', [10], 0]]);
     const counts = await adapter.loadPivotCounts({ levels: [{ field: 'customer' }], paths: [[]] });
-    expect([api.calls[1].body, counts.childCount([])]).toEqual([{ kind: 'counts', filter: null, keep: [], levels: [{ field: 'customer' }], paths: [[]] }, 4]);
+    expect([api.calls[1].body, counts.childCount([])]).toEqual([{ kind: 'counts', filter: null, keep: [], levels: [{ field: 'customer' }], paths: [[]], measures: [], nonEmpty: false }, 4]);
     const cells = await adapter.loadPivotCells({ rows: [{ field: 'customer' }], columns: [], measures: [sum], rowPaths: [['c1']], columnPaths: [[]] });
     expect([(api.calls[2].body as { kind: string }).kind, cells.values(['c1'], [])]).toEqual(['cells', [10]]);
+    // Members whose measures are all empty left out: `nonEmpty`, with the measures a count reads.
+    const avg = { type: 'avg', field: 'amount' } as const;
+    await adapter.loadPivotMembers({ levels: [{ field: 'customer' }], slices: [{ parent: [] }], measures: [avg], nonEmpty: true });
+    await adapter.loadPivotCounts({ levels: [{ field: 'customer' }], paths: [[]], measures: [avg], nonEmpty: true });
+    expect([(api.calls[3].body as { nonEmpty: boolean }).nonEmpty, api.calls[4].body]).toEqual([
+      true,
+      { kind: 'counts', filter: null, keep: [], levels: [{ field: 'customer' }], paths: [[]], measures: [{ type: 'avg', field: 'amount' }], nonEmpty: true },
+    ]);
     // An endpoint of whole pivots only: a view loads the pivot whole.
     expect(make(api, { pivot: { url: '/api/orders/pivot', window: false } }).capabilities.pivotWindow).toBe(false);
   });

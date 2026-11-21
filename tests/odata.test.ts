@@ -612,6 +612,36 @@ describe('ODataAdapter pivot windows', () => {
     expect(service.calls).toHaveLength(2);
   });
 
+  it('leaves out the members whose measures are all empty with nonEmpty, filtered after they are aggregated', async () => {
+    const avg = 'aggregate($count as _n,amount with average as _m0)';
+    const listed = `filter(region ne null)/groupby((region),${avg})/filter(_m0 ne null)`;
+    const cities = `groupby((region,city),${avg})/filter(_m0 ne null)`;
+    const service = serviceOf({
+      [`${listed} | region asc | 1`]: { '@odata.count': 2, value: [{ region: 'North', _n: 2, _m0: 20 }] },
+      [`${cities}/groupby((region),aggregate($count as _c))`]: { value: [{ region: 'North', _c: 2 }, { region: 'South', _c: 1 }] },
+      [`groupby((region),${avg})/filter(_m0 ne null)/aggregate($count as _c)`]: { value: [{ _c: 2 }] },
+      [`filter(region eq 'North')/${cities}/groupby((region),aggregate($count as _c))`]: { value: [{ region: 'North', _c: 2 }] },
+    });
+    const adapter = sales$(service, true);
+    const measures: data.PivotMeasure[] = [{ type: 'avg', field: 'amount' }];
+    const levels: data.PivotLevel[] = [region, { field: 'city' }];
+    const r = await adapter.loadPivotMembers({ levels, slices: [{ parent: [], take: 1 }], measures, childCounts: true, nonEmpty: true });
+    // The empty region, no amount among its rows, is no record of the answer.
+    expect(queries(service)).toEqual([`${listed} | region asc | 1 | true`, `filter(region eq null)/${avg}/filter(_m0 ne null)`, `${cities}/groupby((region),aggregate($count as _c))`]);
+    expect([keysOf(r), r.slices[0].members[0].childCount]).toEqual([[[2, [['North', 2, 20]]]], 2]);
+    service.calls.length = 0;
+    const counts = await adapter.loadPivotCounts({ levels, paths: [[], ['North']], measures, nonEmpty: true });
+    expect(queries(service)).toEqual([`groupby((region),${avg})/filter(_m0 ne null)/aggregate($count as _c)`, `filter(region eq 'North')/${cities}/groupby((region),aggregate($count as _c))`]);
+    expect([counts.childCount([]), counts.childCount(['North'])]).toEqual([2, 2]);
+
+    // A sum or a count always has a value: nothing is filtered.
+    const both = 'aggregate($count as _n,amount with average as _m0,amount with sum as _m1)';
+    const plain = serviceOf({ [`filter(region ne null)/groupby((region),${both}) | region asc`]: { '@odata.count': 0, value: [] } });
+    await sales$(plain, true).loadPivotMembers({ levels, slices: [{ parent: [] }], measures: [...measures, { type: 'sum', field: 'amount' }], nonEmpty: true });
+    await sales$(plain, true).loadPivotCounts({ levels, paths: [[]], measures: [...measures, { type: 'count' }], nonEmpty: true });
+    expect(queries(plain)).toEqual([`filter(region ne null)/groupby((region),${both}) | region asc | true`, `filter(region eq null)/${both}`, 'groupby((region))/aggregate($count as _c)']);
+  });
+
   it('asks for the crossings by pairs of depths, a long list of members in several reads', async () => {
     const service = serviceOf({
       [sum]: { value: [{ _n: 4, _m0: 65 }] },
@@ -690,5 +720,28 @@ describe('ODataAdapter pivot member places', () => {
     });
     // North 40, South 20, the empty region 5: South after North, the empty region after both.
     expect([r.slices[0].total, r.found]).toEqual([3, [1, 2, -1]]);
+  });
+
+  it('finds no member nonEmpty leaves out', async () => {
+    const avg = 'aggregate($count as _n,amount with average as _m0)';
+    const listed = `filter(region eq 'North')/filter(city ne null)/groupby((region,city),${avg})/filter(_m0 ne null)`;
+    const empty = `filter(region eq 'North')/filter(city eq null)/${avg}/filter(_m0 ne null)`;
+    const service = serviceOf({
+      [`${listed} | city asc | 0`]: { '@odata.count': 1, value: [] },
+      [`${listed}/filter(city lt 'Oslo') | 0`]: { '@odata.count': 0, value: [] },
+      [`${listed}/filter(city eq 'Oslo') | 0`]: { '@odata.count': 1, value: [] },
+      [empty]: { value: [] },
+    });
+    const r = await sales$(service).loadPivotMembers({
+      levels: [{ field: 'region' }, { field: 'city' }],
+      slices: [{ parent: ['North'], take: 0 }],
+      measures: [{ type: 'avg', field: 'amount' }],
+      nonEmpty: true,
+      find: [['North', 'Oslo'], ['North', 'Bergen'], ['North', null]],
+    });
+    // Bergen and the empty city have no amount: neither is among the members.
+    expect([r.slices[0].total, r.found]).toEqual([1, [0, -1, -1]]);
+    expect(service.calls.map((c) => c.query.$apply)).toContain(`${listed}/filter(city eq 'Bergen')`);
+    expect(service.calls.map((c) => c.query.$apply).filter((apply) => apply === empty)).toHaveLength(2);
   });
 });

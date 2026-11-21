@@ -1,17 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { data } from '../src';
-const { ArrayAdapter, pivotCells, pivotCounts, pivotMembers, queryPivot, where } = data;
+const { allEmpty, ArrayAdapter, pivotCells, pivotCounts, pivotMembers, queryPivot, where } = data;
 
-type Sale = { id: number; region: string | null; city: string; day: string; amount: number | null; units: number };
+type Sale = { id: number; region: string | null; city: string; day: string; amount: number | null; units: number; rating: number | null };
 
 const sales: Sale[] = [
-  { id: 1, region: 'North', city: 'Oslo', day: '2023-11-02', amount: 100, units: 1 },
-  { id: 2, region: 'north', city: 'Bergen', day: '2024-01-15', amount: 50, units: 2 },
-  { id: 3, region: 'South', city: 'Rome', day: '2024-02-01', amount: 30, units: 3 },
-  { id: 4, region: 'South', city: 'Rome', day: '2024-07-04', amount: null, units: 4 },
-  { id: 5, region: null, city: 'Nowhere', day: '2023-05-05', amount: 20, units: 5 },
-  { id: 6, region: 'South', city: 'Milan', day: '2023-12-31', amount: 10, units: 6 },
-  { id: 7, region: 'East', city: 'Kyiv', day: '2024-03-03', amount: 70, units: 7 },
+  { id: 1, region: 'North', city: 'Oslo', day: '2023-11-02', amount: 100, units: 1, rating: 4 },
+  { id: 2, region: 'north', city: 'Bergen', day: '2024-01-15', amount: 50, units: 2, rating: null },
+  { id: 3, region: 'South', city: 'Rome', day: '2024-02-01', amount: 30, units: 3, rating: null },
+  { id: 4, region: 'South', city: 'Rome', day: '2024-07-04', amount: null, units: 4, rating: null },
+  { id: 5, region: null, city: 'Nowhere', day: '2023-05-05', amount: 20, units: 5, rating: null },
+  { id: 6, region: 'South', city: 'Milan', day: '2023-12-31', amount: 10, units: 6, rating: 3 },
+  { id: 7, region: 'East', city: 'Kyiv', day: '2024-03-03', amount: 70, units: 7, rating: null },
 ];
 const ctx: data.EvaluateContext = { locale: 'en-US', fields: { day: 'date' } };
 const sum = { type: 'sum', field: 'amount' } as const;
@@ -108,6 +108,95 @@ describe('pivot windows in memory', () => {
   });
 });
 
+describe('pivot windows without empty members', () => {
+  // Ratings: North 4 (Oslo 4, Bergen none), South 3 (Milan 3, Rome none), East and the empty region none.
+  const avg = { type: 'avg', field: 'rating' } as const;
+  const min = { type: 'min', field: 'rating' } as const;
+
+  it('leaves out the members whose measures are all empty, of the part and of the number of all', () => {
+    const top = (measures: data.PivotMeasure<Sale>[], skip?: number, take?: number) =>
+      keysOf(pivotMembers(sales, { levels: [region, city], slices: [{ parent: [], skip, take }], measures, nonEmpty: true }, ctx));
+    expect(top([avg])).toEqual([[2, ['North', 'South']]]);
+    expect(top([avg, min], 1, 1)).toEqual([[2, ['South']]]);
+    const children = pivotMembers(sales, { levels: [region, city], slices: [{ parent: ['north'] }, { parent: ['South'] }, { parent: ['East'] }], measures: [min], nonEmpty: true }, ctx);
+    expect(keysOf(children)).toEqual([
+      [1, ['Oslo']],
+      [1, ['Milan']],
+      [0, []],
+    ]);
+    expect(children.slices[0].members.map((m) => [m.path, m.count, m.values])).toEqual([[['north', 'Oslo'], 1, [4]]]);
+    // The empty region is left out as any other is: with a value of its own it stays.
+    expect(top([{ type: 'max', field: 'amount' }])).toEqual([[4, ['East', 'North', 'South', null]]]);
+    expect(keysOf(pivotMembers(sales, { levels: [region, city], slices: [{ parent: [null] }], measures: [avg], nonEmpty: true }, ctx))).toEqual([[0, []]]);
+  });
+
+  it('counts, finds and orders only the members not left out', () => {
+    const counted = (nonEmpty: boolean) =>
+      pivotMembers(sales, { levels: [region, city, year], slices: [{ parent: [] }], measures: [avg], nonEmpty, childCounts: true }, ctx).slices[0].members.map((m) => [m.key, m.childCount]);
+    expect(counted(false)).toEqual([
+      ['East', 1],
+      ['North', 2],
+      ['South', 2],
+      [null, 1],
+    ]);
+    expect(counted(true)).toEqual([
+      ['North', 1],
+      ['South', 1],
+    ]);
+    const milan = pivotMembers(sales, { levels: [region, city, year], slices: [{ parent: ['South'] }], measures: [avg], nonEmpty: true, childCounts: true }, ctx);
+    expect(milan.slices[0].members.map((m) => [m.path, m.childCount])).toEqual([[['South', 'Milan'], 1]]);
+
+    const find = [['North', 'Bergen'], ['north', 'oslo'], ['South', 'Milan'], [null, 'Nowhere']];
+    const places = (nonEmpty: boolean) => pivotMembers(sales, { levels: [region, city], slices: [{ parent: ['North'], take: 0 }], measures: [avg], nonEmpty, find }, ctx).found;
+    expect(places(false)).toEqual([0, 1, 0, 0]);
+    expect(places(true)).toEqual([-1, 0, 0, -1]);
+
+    const sorted = (nonEmpty: boolean) => keysOf(pivotMembers(sales, { levels: [region], slices: [{ parent: [] }], measures: [avg], sortBySummary: { measure: 0 }, nonEmpty }, ctx));
+    expect(sorted(false)).toEqual([[4, ['South', 'North', 'East', null]]]);
+    expect(sorted(true)).toEqual([[2, ['South', 'North']]]);
+
+    const paths = [[], ['north'], ['South'], ['East'], [null]];
+    const counts = pivotCounts(sales, { levels: [region, city], paths, measures: [avg], nonEmpty: true }, ctx);
+    expect(paths.map((path) => counts.childCount(path))).toEqual([2, 1, 1, 0, 0]);
+    // 2023: the second quarter has no rating, the fourth has; 2024 has none.
+    const quarters = pivotCounts(sales, { levels: [year, quarter], paths: [[2023], [2024]], measures: [min], nonEmpty: true }, ctx);
+    expect([quarters.childCount([2023]), quarters.childCount([2024])]).toEqual([1, 0]);
+  });
+
+  it('leaves nothing out with a measure that always has a value, or without measures', () => {
+    const lists: (data.PivotMeasure<Sale>[] | undefined)[] = [[avg, sum], [count], [{ type: 'countDistinct', field: 'rating' }], [{ type: 'sum', field: 'rating' }], [], undefined];
+    for (const measures of lists) {
+      const r = pivotMembers(sales, { levels: [region, city], slices: [{ parent: [] }], measures, nonEmpty: true, childCounts: true }, ctx);
+      expect(r.slices[0].members.map((m) => [m.key, m.childCount])).toEqual([
+        ['East', 1],
+        ['North', 2],
+        ['South', 2],
+        [null, 1],
+      ]);
+      expect(pivotCounts(sales, { levels: [region, city], paths: [['South']], measures, nonEmpty: true }, ctx).childCount(['South'])).toBe(2);
+    }
+  });
+
+  it('gives the members of queryPivot whose measures are not all empty, on every level', () => {
+    const levels = [region, city, quarter];
+    const lists: data.PivotMeasure<Sale>[][] = [[avg], [min, { type: 'max', field: 'amount' }]];
+    for (const measures of lists) {
+      const whole = queryPivot(sales, { rows: levels, measures }, ctx);
+      const kept = (m: data.PivotMember) => (m.children ?? []).filter((c) => !allEmpty(whole.values(c, whole.columns) ?? []));
+      const walk = (m: data.PivotMember) => {
+        if (m.path.length >= levels.length) return;
+        const r = pivotMembers(sales, { levels, slices: [{ parent: m.path }], measures, nonEmpty: true, childCounts: true }, ctx);
+        const expected = kept(m).map((c) => [c.key, whole.values(c, whole.columns), c.path.length < levels.length ? kept(c).length : 0]);
+        expect([m.path, r.slices[0].members.map((c) => [c.key, c.values, c.childCount])]).toEqual([m.path, expected]);
+        expect(pivotCounts(sales, { levels, paths: [m.path], measures, nonEmpty: true }, ctx).childCount(m.path)).toBe(kept(m).length);
+        m.children?.forEach(walk);
+      };
+      walk(whole.rows);
+    }
+    expect([allEmpty([]), allEmpty([null, undefined, '', NaN]), allEmpty([null, 0])]).toEqual([false, true, false]);
+  });
+});
+
 /** An array that answers as a backend computing the parts of pivots: the answers pass through JSON, as from a server. */
 class Server extends ArrayAdapter<Sale, number> {
   readonly asked: string[] = [];
@@ -151,9 +240,13 @@ describe('pivot windows on adapters', () => {
       { levels: [region], slices: [{ parent: [], take: -1 }] },
       { levels: [region], slices: [{ parent: [] }], measures: [sum], sortBySummary: { measure: 1 } },
       { levels: [region], slices: [{ parent: [] }], measures: [sum], sortBySummary: { measure: 0, path: ['x'] } },
+      { levels: [region], slices: [{ parent: [] }], nonEmpty: 'yes' },
     ];
     for (const options of bad) await expect(a.loadPivotMembers(options as data.PivotMembersOptions<Sale>)).rejects.toMatchObject({ code: 'MJD302' });
     await expect(a.loadPivotCounts({ levels: [region], paths: [['North']] })).rejects.toMatchObject({ code: 'MJD302' });
+    for (const more of [{ nonEmpty: 1 }, { measures: [{ type: 'median', field: 'rating' }], nonEmpty: true }]) {
+      await expect(a.loadPivotCounts({ levels: [region], paths: [[]], ...more } as unknown as data.PivotCountsOptions<Sale>)).rejects.toMatchObject({ code: 'MJD302' });
+    }
     await expect(a.loadPivotCells({ rows: [region], columns: [], measures: [count], rowPaths: [['North', 'Oslo']], columnPaths: [[]] })).rejects.toMatchObject({ code: 'MJD302' });
   });
 
@@ -169,6 +262,32 @@ describe('pivot windows on adapters', () => {
     const cells = await server.loadPivotCells({ rows: [region], columns: [year], measures: [sum], rowPaths: [['NORTH']], columnPaths: [[2024], []] });
     expect([cells.values(['north'], [2024]), cells.values(['North'], [])]).toEqual([[50], [150]]);
     expect(server.asked).toEqual(['members', 'counts', 'cells']);
+  });
+
+  it('leaves out empty members on the backend, or in memory where a measure needs it', async () => {
+    const server = new Server();
+    const avg = { type: 'avg', field: 'rating' } as const;
+    const best: data.PivotCustomMeasure<Sale, number | null> = {
+      type: 'custom',
+      field: 'rating',
+      start: () => null,
+      add: (most, value) => (typeof value === 'number' && (most === null || value > most) ? value : most),
+      result: (most) => most,
+    };
+    const members = await server.loadPivotMembers({ levels: [region, city], slices: [{ parent: [] }], measures: [avg], nonEmpty: true, childCounts: true });
+    expect(members.slices[0].members.map((m) => [m.key, m.childCount])).toEqual([
+      ['North', 1],
+      ['South', 1],
+    ]);
+    const counts = await server.loadPivotCounts({ levels: [region, city], paths: [[], ['South']], measures: [avg], nonEmpty: true });
+    expect([counts.childCount([]), counts.childCount(['South'])]).toEqual([2, 1]);
+    expect(server.asked).toEqual(['members', 'counts']);
+    // A custom measure needs memory: the rows are grouped here.
+    const custom = await server.loadPivotCounts({ levels: [region, city], paths: [[], ['South']], measures: [best], nonEmpty: true });
+    expect([custom.childCount([]), custom.childCount(['South']), server.asked.length]).toEqual([2, 1, 2]);
+    // Without nonEmpty the measures of a count are not read.
+    await server.loadPivotCounts({ levels: [region, city], paths: [[]], measures: [best] });
+    expect(server.asked).toEqual(['members', 'counts', 'counts']);
   });
 
   it('fails with an answer that is none', async () => {

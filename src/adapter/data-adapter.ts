@@ -190,12 +190,15 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
     );
   }
 
-  /** The number of children of members of a pivot axis (see `PivotCountsOptions`); computed as `loadPivotMembers` is. */
+  /**
+   * The number of children of members of a pivot axis (see `PivotCountsOptions`); computed as `loadPivotMembers` is. Its
+   * measures count only with `nonEmpty`: then one that needs memory has the rows grouped here.
+   */
   loadPivotCounts(options: PivotCountsOptions<T>): Promise<PivotCountsResult> {
     return this.pivotPart(
       options,
       checkCountsOptions,
-      (o) => ({ rows: o.levels, keep: o.keep }),
+      (o) => ({ rows: o.levels, keep: o.keep, measures: o.nonEmpty ? o.measures : undefined }),
       pivotCounts,
       (o) => this.loadPivotChildCounts(o),
       (body, o, ctx) => readPivotCounts(body, o, this.fields, ctx),

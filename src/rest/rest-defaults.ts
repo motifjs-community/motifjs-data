@@ -54,9 +54,10 @@ export function defaultPivotBody(options: PivotLoadOptions<any>): Record<string,
 
 /**
  * The body of a part of a pivot, `kind` first, the levels, measures and members kept as `defaultPivotBody` writes them:
- * `{ kind: 'members', filter, keep, levels, slices: [{ parent, skip, take }], measures, sortBySummary, childCounts }`,
- * `{ kind: 'counts', filter, keep, levels, paths }` or `{ kind: 'cells', filter, keep, rows, columns, measures, rowPaths,
- * columnPaths }`, with `running: [{ measure, axis, orders }]` where running totals are asked for.
+ * `{ kind: 'members', filter, keep, levels, slices: [{ parent, skip, take }], measures, sortBySummary, childCounts, find,
+ * nonEmpty }`, `{ kind: 'counts', filter, keep, levels, paths, measures, nonEmpty }` or `{ kind: 'cells', filter, keep,
+ * rows, columns, measures, rowPaths, columnPaths }`, with `running: [{ measure, axis, orders }]` where running totals are
+ * asked for.
  */
 export function defaultPivotPartBody(kind: RestPivotPart, options: RestPivotPartOptions<any>): Record<string, unknown> {
   const level = ({ field, interval, dir }: PivotLevel<any>) => ({ field, interval, dir });
@@ -74,11 +75,12 @@ export function defaultPivotPartBody(kind: RestPivotPart, options: RestPivotPart
       sortBySummary: sort ? { measure: sort.measure, levels: (sort.levels ?? []).map(level), path: sort.path ?? [] } : null,
       childCounts: !!o.childCounts,
       find: o.find ?? [],
+      nonEmpty: !!o.nonEmpty,
     };
   }
   if (kind === 'counts') {
     const o = options as PivotCountsOptions<any>;
-    return { ...base, levels: o.levels.map(level), paths: o.paths };
+    return { ...base, levels: o.levels.map(level), paths: o.paths, measures: (o.measures ?? []).map(measure), nonEmpty: !!o.nonEmpty };
   }
   const o = options as PivotCellsOptions<any>;
   const cells: Record<string, unknown> = { ...base, rows: o.rows.map(level), columns: o.columns.map(level), measures: o.measures.map(measure), rowPaths: o.rowPaths, columnPaths: o.columnPaths };

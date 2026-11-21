@@ -143,6 +143,19 @@ export function readPivotGroup(group: unknown, options: PivotLoadOptions<any>, f
   return out;
 }
 
+/**
+ * Whether there is a value and every one is empty (`isEmpty`: `null`, `undefined`, `''`, `NaN`): a member whose
+ * measures are all empty, the one `nonEmpty` leaves out.
+ */
+export function allEmpty(values: readonly unknown[]): boolean {
+  return values.length > 0 && values.every(isEmpty);
+}
+
+/** Whether a member's measures can all be empty: `count`, `countDistinct` and `sum` always have a value (0 for no rows). */
+export function mayBeEmpty<T>(measures: readonly PivotMeasure<T>[]): boolean {
+  return measures.length > 0 && !measures.some((m) => m.type === 'count' || m.type === 'countDistinct' || m.type === 'sum');
+}
+
 /** Whether a row is kept by `keep`: its member on one of the levels the intervals make is one of the paths, or `filter` passes it. */
 export function keeper<T>(keep: PivotKeep<T>, ctx: EvaluateContext): (row: T) => boolean {
   const intervals: readonly (PivotInterval | undefined)[] = keep.intervals?.length ? keep.intervals : [undefined];

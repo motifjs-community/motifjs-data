@@ -26,6 +26,13 @@ export interface PivotMembersOptions<T = unknown> {
    * view places a member shown open that the parts it loaded do not hold.
    */
   find?: readonly (readonly unknown[])[];
+  /**
+   * Leaves out the members whose measures are all empty (`allEmpty` of their values): of `members`, `total`,
+   * `childCount` and `found` (-1 for a member left out). A `count`, `countDistinct` or `sum` always has a value, so
+   * with one of them, or without measures, no member is left out. Not about the empty member (key `null`): it is
+   * left out only as any other is, by its measures.
+   */
+  nonEmpty?: boolean;
   /** Related data the rows need when they are grouped in memory (OData `$expand`). */
   expand?: readonly string[];
   /** Passed to the backend as they are. */

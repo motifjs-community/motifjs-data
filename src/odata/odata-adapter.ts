@@ -17,7 +17,7 @@ import { or, where } from '../query/filter-builders';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
 import type { FilterExpression } from '../query/filter-expression';
-import { PivotAxis, type PivotDepth, pivotDepths, readKey, readValue } from '../query/pivot';
+import { mayBeEmpty, PivotAxis, type PivotDepth, pivotDepths, readKey, readValue } from '../query/pivot';
 import type { PivotCellsOptions } from '../query/pivot-cells-options';
 import type { PivotCountsOptions } from '../query/pivot-counts-options';
 import type { PivotGroup } from '../query/pivot-group';
@@ -101,7 +101,8 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
   // its own way, so they never reach `$orderby`: ordered by a measure, the members come in groups the measure's value
   // tells apart (above, at and below 0 for a sum; with and without one for the others), counted first and paged after,
   // and the empty member takes its place among them by its value. Ordered by a measure in a member of the other axis,
-  // every member of the parent comes and they are ordered here.
+  // every member of the parent comes and they are ordered here. With `nonEmpty`, every read filters the members on their
+  // measures after it aggregates them: `…/groupby((Region,City),aggregate(…))/filter(_m0 ne null or _m1 ne null)`.
   protected override async loadPivotMemberSlices(o: PivotMembersOptions<T>): Promise<unknown> {
     const [answer, found] = await Promise.all([this.memberSlices(o), o.find?.length ? this.findPlaces(o) : undefined]);
     return found ? { ...answer, found } : answer;
@@ -118,7 +119,8 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     const measures = o.measures ?? [];
     const values = valuesText(measures);
     const dir = o.levels[depth].dir === 'desc' ? 'desc' : 'asc';
-    const groupby = `groupby((${grouped.map(groupedText).join(',')}),aggregate(${values}))`;
+    const filled = nonEmptyText(o);
+    const groupby = `groupby((${grouped.map(groupedText).join(',')}),aggregate(${values}))${filled}`;
     const sort = o.sortBySummary;
     const ctx = this.evaluateContext;
     const axis = new PivotAxis<T>(o.levels.slice(0, depth + 1), ctx);
@@ -126,7 +128,7 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     const parentOf = (path: readonly unknown[]) => path.slice(0, depth);
     const under = (parent: readonly unknown[]) => (parent.length ? [`filter(${this.pathText(grouped, parent)})`] : []);
     const listedOf = (parent: readonly unknown[]) => [...this.partSteps(o, grouped), ...under(parent), `filter(${member} ne null)`, groupby].join('/');
-    const emptyOf = (parent: readonly unknown[]) => [...this.partSteps(o, grouped), ...under(parent), `filter(${member} eq null)`, `aggregate(${values})`].join('/');
+    const emptyOf = (parent: readonly unknown[]) => [...this.partSteps(o, grouped), ...under(parent), `filter(${member} eq null)`, `aggregate(${values})${filled}`].join('/');
     const literal = (key: unknown) => odataLiteral(key, keyType(level, key, this.fields));
     const isEmpty = (key: unknown) => key === null || key === undefined;
     const counted = { $count: 'true', $top: '0' };
@@ -211,7 +213,9 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     const measures = o.measures ?? [];
     const values = valuesText(measures);
     const dir = o.levels[depth].dir === 'desc' ? 'desc' : 'asc';
-    const groupby = `groupby((${grouped.map(groupedText).join(',')}),aggregate(${values}))`;
+    const filled = nonEmptyText(o);
+    const groupby = `groupby((${grouped.map(groupedText).join(',')}),aggregate(${values}))${filled}`;
+    const aggregated = `aggregate(${values})${filled}`;
     const sort = o.sortBySummary;
     const columns = (sort?.levels ?? []).slice(0, sort?.path?.length ?? 0).map((level, j): GroupedLevel<T> => ({ level, alias: `_c${j}` }));
     const next = depth + 1 < o.levels.length && o.childCounts ? o.levels.slice(0, depth + 2).map((level, i): GroupedLevel<T> => ({ level, alias: `_r${i}` })) : null;
@@ -232,7 +236,7 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
       const skip = slice.skip ?? 0;
       if (!sort) {
         first.push({ $apply: listed, $orderby: `${member} ${dir}`, $count: 'true', ...pageOf(skip, slice.take === undefined ? Infinity : skip + slice.take) });
-        first.push({ $apply: [...steps, `filter(${member} eq null)`, `aggregate(${values})`].join('/') });
+        first.push({ $apply: [...steps, `filter(${member} eq null)`, aggregated].join('/') });
       } else if (columns.length) {
         const measure = measures[sort.measure];
         const one = measure.type === 'count' ? '$count as _s' : `${odataPath((measure as { field: string }).field)} with ${AGGREGATE[measure.type as keyof typeof AGGREGATE]} as _s`;
@@ -241,12 +245,12 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
         first.push({ $apply: [...both, ...(under ? [under] : []), `filter(${this.pathText(columns, sort.path!)})`, `groupby((${grouped.map(groupedText).join(',')}),aggregate(${one}))`].join('/') });
       } else {
         for (const g of groups) first.push({ $apply: g.filter ? `${listed}/filter(${g.filter})` : listed, $count: 'true', $top: '0' });
-        first.push({ $apply: [...steps, `filter(${member} eq null)`, `aggregate(${values})`].join('/') });
+        first.push({ $apply: [...steps, `filter(${member} eq null)`, aggregated].join('/') });
       }
       if (next) {
         plan.counts = first.length;
         const counted = this.partSteps(o, next);
-        first.push({ $apply: [...counted, ...(under ? [under] : []), `groupby((${next.map(groupedText).join(',')}))`, `groupby((${grouped.map(groupedText).join(',')}),aggregate($count as _c))`].join('/') });
+        first.push({ $apply: [...counted, ...(under ? [under] : []), countedText(next, o), `groupby((${grouped.map(groupedText).join(',')}),aggregate($count as _c))`].join('/') });
       }
       return plan;
     });
@@ -361,7 +365,8 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     return home < 0 ? groups.length - 1 : home;
   }
 
-  // The number of children of members, by the depth of their paths: `filter(…)/groupby((Region,City))/groupby((Region),aggregate($count as _c))`.
+  // The number of children of members, by the depth of their paths: `filter(…)/groupby((Region,City))/groupby((Region),aggregate($count as _c))`;
+  // with `nonEmpty`, the children filtered on their measures first: `groupby((Region,City),aggregate(…))/filter(_m0 ne null)/…`.
   protected override async loadPivotChildCounts(o: PivotCountsOptions<T>): Promise<unknown> {
     const reads: { query: Record<string, string>; depth: number }[] = [];
     for (const [depth, paths] of byLength(o.paths)) {
@@ -369,7 +374,7 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
       const steps = this.partSteps(o, grouped);
       const last = depth ? `groupby((${grouped.slice(0, depth).map(groupedText).join(',')}),aggregate($count as _c))` : 'aggregate($count as _c)';
       for (const part of depth ? this.pathChunks(grouped, paths) : [null]) {
-        reads.push({ depth, query: { $apply: [...steps, ...(part ? [`filter(${part})`] : []), `groupby((${grouped.map(groupedText).join(',')}))`, last].join('/') } });
+        reads.push({ depth, query: { $apply: [...steps, ...(part ? [`filter(${part})`] : []), countedText(grouped, o), last].join('/') } });
       }
     }
     const bodies = await this.readApplied(
@@ -811,6 +816,21 @@ function valuesText(measures: readonly PivotMeasure<any>[]): string {
     if (m.type !== 'count' && m.type !== 'custom') values.push(`${odataPath(m.field!)} with ${AGGREGATE[m.type]} as _m${k}`);
   });
   return values.join(',');
+}
+
+// `/filter(_m0 ne null or _m1 ne null)`, after an aggregate: with `nonEmpty`, the groups whose measures are not all
+// empty; nothing when none is left out (a count, a distinct count or a sum always has a value).
+function nonEmptyText<T>(o: { measures?: readonly PivotMeasure<T>[]; nonEmpty?: boolean }): string {
+  const measures = o.measures ?? [];
+  return o.nonEmpty && mayBeEmpty(measures) ? `/filter(${measures.map((_, k) => `_m${k} ne null`).join(' or ')})` : '';
+}
+
+// The groups of the levels, to count them: `groupby((Region,City))`; with `nonEmpty`, those whose measures are not all
+// empty: `groupby((Region,City),aggregate(…))/filter(_m0 ne null)`.
+function countedText<T>(grouped: readonly GroupedLevel<T>[], o: { measures?: readonly PivotMeasure<T>[]; nonEmpty?: boolean }): string {
+  const by = grouped.map(groupedText).join(',');
+  const filled = nonEmptyText(o);
+  return filled ? `groupby((${by}),aggregate(${valuesText(o.measures ?? [])}))${filled}` : `groupby((${by}))`;
 }
 
 // A level's key in an answer: under the field's path, or under its alias when the level computes it.

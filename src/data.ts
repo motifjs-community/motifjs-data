@@ -74,7 +74,7 @@ export { validateFilter } from './query/filter-validation';
 export { createRowFilter } from './query/row-filter';
 export { groupContext, groupOrder, groupRows, rowsOfGroups } from './query/grouping';
 export { pickFields, queryArray } from './query/local-query';
-export { intervalValue, isPivotInterval, pivotDepths, pivotGroups, pivotResult, queryPivot, readPivotGroup } from './query/pivot';
+export { allEmpty, intervalValue, isPivotInterval, pivotDepths, pivotGroups, pivotResult, queryPivot, readPivotGroup } from './query/pivot';
 export { pivotCellGroups, pivotCells, pivotCellsResult, pivotCounts, pivotMembers, readPivotCounts, readPivotMembers } from './query/pivot-window';
 export { summarize, SummaryRule } from './query/summaries';
 export { sortedIndexes, sortRows } from './query/sort';

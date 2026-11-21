@@ -1,6 +1,6 @@
 import type { EvaluateContext } from './evaluate-context';
 import type { FieldType } from './field-type';
-import { keeper, measureRule, PivotAxis, pivotGroups, pivotResult, readKey, readValue } from './pivot';
+import { allEmpty, keeper, mayBeEmpty, measureRule, PivotAxis, pivotGroups, pivotResult, readKey, readValue } from './pivot';
 import type { PivotCellsOptions } from './pivot-cells-options';
 import type { PivotCellsResult } from './pivot-cells-result';
 import type { PivotCountsOptions } from './pivot-counts-options';
@@ -17,7 +17,8 @@ import { runningAsks, runningTotals } from './pivot-running';
 
 /**
  * The members `loadPivotMembers` asks for, over rows in memory: every child of each slice's parent is grouped and
- * ordered as `queryPivot` orders them (or by `sortBySummary`), then the slice's part is taken.
+ * ordered as `queryPivot` orders them (or by `sortBySummary`), without those `nonEmpty` leaves out, then the slice's
+ * part is taken.
  */
 export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions<T>, ctx: EvaluateContext = {}): PivotMembersResult {
   const depth = options.slices[0]?.parent.length ?? 0;
@@ -32,19 +33,20 @@ export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions
   const under = depth ? rows.filter((row) => hits(row, upper, parents, ids) > 0) : rows;
   const query = { filter: options.filter, keep: options.keep, rows: levels, columns, measures: options.measures, expandedRows: true as const, expandedColumns: prefixes([path]) };
   const result = pivotResult(pivotGroups(under, query, ctx), query, ctx);
-  // The children of the members are counted, not grouped: only their number is asked for.
-  const below = options.childCounts && depth + 1 < options.levels.length ? found(under, options.levels.slice(0, depth + 2), true, options, ctx) : null;
+  const below = options.childCounts && depth + 1 < options.levels.length ? counted(under, options.levels.slice(0, depth + 2), true, options, ctx) : null;
   const axis = new PivotAxis<T>(levels, ctx);
   const total = result.columns;
   const at = memberAt(result.columns, path, new PivotAxis<T>(columns, ctx));
   const dir = options.levels[depth]?.dir;
   const measures = options.measures ?? [];
+  const nonEmpty = !!options.nonEmpty && mayBeEmpty(measures);
   const known = new Map<string, readonly PivotMember[]>();
   const childrenOf = (path: readonly unknown[]) => {
     const id = upper.idOf(path);
     let children = known.get(id);
     if (!children) {
       children = memberAt(result.rows, path, axis)?.children ?? [];
+      if (nonEmpty) children = children.filter((m) => !allEmpty(result.values(m, total) ?? []));
       if (sort) children = bySummary(children, (m) => (at ? result.values(m, at)?.[sort.measure] : undefined), dir);
       known.set(id, children);
     }
@@ -79,8 +81,35 @@ export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions
 export function pivotCounts<T>(rows: readonly T[], options: PivotCountsOptions<T>, ctx: EvaluateContext = {}): PivotCountsResult {
   const deepest = options.paths.reduce((most, path) => Math.max(most, path.length), 0);
   const levels = options.levels.slice(0, Math.min(deepest + 1, options.levels.length));
-  const axis = found(rows, levels, prefixes(options.paths, true), options, ctx);
-  return { childCount: (path) => axis.childCount(path) };
+  return counted(rows, levels, prefixes(options.paths, true), options, ctx);
+}
+
+/**
+ * The number of children of members shown open, of the rows `filter` passes and `keep` keeps: counted, not grouped, as
+ * only their number is asked for. With `nonEmpty` (and measures that can all be empty) the children are grouped for
+ * their measures, and those whose measures are all empty are not counted.
+ */
+function counted<T>(
+  rows: readonly T[],
+  levels: readonly PivotLevel<T>[],
+  expanded: true | readonly (readonly unknown[])[],
+  options: Pick<PivotCountsOptions<T>, 'filter' | 'keep' | 'measures' | 'nonEmpty'>,
+  ctx: EvaluateContext,
+): PivotCountsResult {
+  const measures = options.measures ?? [];
+  if (!options.nonEmpty || !mayBeEmpty(measures)) {
+    const axis = found(rows, levels, expanded, options, ctx);
+    return { childCount: (path) => axis.childCount(path) };
+  }
+  const axis = new PivotAxis<T>(levels, ctx);
+  const counts = new Map<string, number>();
+  // Without columns, a group per member shown: counted under its parent.
+  for (const group of pivotGroups(rows, { filter: options.filter, keep: options.keep, rows: levels, measures, expandedRows: expanded }, ctx)) {
+    if (!group.rows.length || allEmpty(group.values)) continue;
+    const id = axis.idOf(group.rows.slice(0, -1));
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return { childCount: (path) => counts.get(axis.idOf(path)) ?? 0 };
 }
 
 /** An axis that found the members of the rows `filter` passes and `keep` keeps: its members shown open know their children. */

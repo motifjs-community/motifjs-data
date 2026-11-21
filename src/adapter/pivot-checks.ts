@@ -51,6 +51,7 @@ export function checkMembersOptions<T>(o: PivotMembersOptions<T>, invalid: Inval
     if (!Array.isArray(o.find) || !o.find.every((path) => Array.isArray(path) && path.length === depth)) throw invalid(`find are members of the level asked for, ${depth} keys each`);
     out.find = o.find.map((path) => [...path]);
   }
+  checkNonEmpty(o, invalid);
   if (o.expand) out.expand = [...o.expand];
   return out;
 }
@@ -63,6 +64,8 @@ export function checkCountsOptions<T>(o: PivotCountsOptions<T>, invalid: Invalid
   if (!out.levels.length) throw invalid('levels needs at least one level');
   out.paths = checkPaths(o.paths, 'paths', out.levels.length - 1, invalid);
   if (o.keep) out.keep = checkKeep(o.keep, invalid);
+  if (o.measures) out.measures = checkMeasures(o.measures, invalid);
+  checkNonEmpty(o, invalid);
   if (o.expand) out.expand = [...o.expand];
   return out;
 }
@@ -147,6 +150,10 @@ function checkMeasures<T>(measures: readonly PivotMeasure<T>[], invalid: Invalid
   };
   if (!Array.isArray(measures) || !measures.every(one)) throw invalid('measures are { type, field } of a summary type (count needs no field), or { type: "custom", start, add, result }');
   return measures.map((m) => ({ ...m }));
+}
+
+function checkNonEmpty(o: { nonEmpty?: unknown }, invalid: Invalid) {
+  if (o.nonEmpty !== undefined && typeof o.nonEmpty !== 'boolean') throw invalid('nonEmpty is true or false');
 }
 
 function checkPaths(paths: readonly (readonly unknown[])[], name: string, deepest: number, invalid: Invalid): unknown[][] {

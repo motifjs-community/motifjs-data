@@ -66,6 +66,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   row's member by the row's value before working out how it compares, and orders members by forms worked out once;
   numbers of children are counted without grouping the children. A level of values all different keeps up to 262,144
   of them worked out.
+- Pivot parts without empty members: `nonEmpty` on `loadPivotMembers` and `loadPivotCounts` leaves out the members
+  whose measures are all empty (`allEmpty`: every value `null`, `undefined`, `''` or `NaN`), of the members, their
+  number, their children's numbers and the places `find` gives, so the lines a view counts stay right. A `count`,
+  `countDistinct` or `sum` always has a value, so with one of them nothing is left out. `loadPivotCounts` takes
+  `measures` for it. Memory computes it, OData filters the groups on their measures after `aggregate`, REST writes
+  `nonEmpty` (and the counts' `measures`) in the body.
 - The demo has a Pivot tab: 100,000 orders by city and customer down, quarter and month across, with
   four measures, members that open and close and a filter; and TripPin's people counted with `$apply`, in
   one `$batch` or not, checked against the memory engine. In Chrome on a desktop machine the first pivot

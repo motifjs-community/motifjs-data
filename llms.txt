@@ -142,8 +142,12 @@ v.values(['France', 'BLONP'], [1997]);
 its members by `levels` and `path`; members without a value last, ties in their order), with the number
 of all of them; `childCounts` counts each member's children too, and `find` gives the places of members
 among their parent's children (`found`, -1 for none): where a view places a member shown open that the
-parts it loaded do not hold. `loadPivotCounts` gives the number of
-children of members, and `loadPivotCells` the measures of every row path with every column path, each
+parts it loaded do not hold. With `nonEmpty` the members whose measures are all empty (`data.allEmpty(values)`:
+each `null`, `undefined`, `''` or `NaN`) are left out of `members`, `total`, `childCount` and `found` alike, so
+the lines a view counts stay right; a `count`, `countDistinct` or `sum` always has a value (0 for no rows), so
+with one of them, or without measures, none is. The empty member (key `null`) is left out only as any other is,
+by its measures. `loadPivotCounts` gives the number of children of members (with `measures` and
+`nonEmpty`, of those not left out), and `loadPivotCells` the measures of every row path with every column path, each
 member at its depth (`[]` is a total); with `running` (`[{ measure, axis: 'rows', orders? }]`) also the running
 totals, `running(rowPath, columnPath)`: a measure added up over a member's siblings, in their order, up to it. A
 backend that gives no running totals has them added up by the adapter from each parent's children and their values.
@@ -154,7 +158,8 @@ memory, as for `loadPivot`. OData pages with `$orderby`, `$skip`, `$top` and `$c
 member apart (a service orders empty values its own way), and orders by a measure in two rounds: the
 groups its value tells apart (a sum above, at and below 0; another measure with and without a value) are
 counted, then paged. Ordered by a measure in a member of the other axis, it reads every member of the
-parent and orders them here.
+parent and orders them here. With `nonEmpty` each read filters the members on their measures after it
+aggregates them (`…/groupby((ShipCountry),aggregate(…))/filter(_m0 ne null or _m1 ne null)`).
 
 **Filters are plain data:** `data.where(field, op, value)` joined with `data.and`, `data.or`, `data.not`. Operators: `=`
 `<>` `<` `<=` `>` `>=` `contains` `notcontains` `startswith` `endswith` `between` `in` `notin`
@@ -373,15 +378,17 @@ The same endpoint answers the parts a view loads as it scrolls, the body marked 
 ```json
 { "kind": "members", "filter": null, "keep": [], "levels": [{ "field": "ShipCountry" }, { "field": "CustomerID", "dir": "desc" }],
   "slices": [{ "parent": ["France"], "skip": 100, "take": 100 }], "measures": [{ "type": "sum", "field": "Freight" }],
-  "sortBySummary": { "measure": 0, "levels": [], "path": [] }, "childCounts": false, "find": [] }
+  "sortBySummary": { "measure": 0, "levels": [], "path": [] }, "childCounts": false, "find": [], "nonEmpty": false }
 ```
 
 answered with `{ "slices": [{ "total": 11, "members": [{ "key": "BLONP", "count": 7, "values": [105.3] }] }] }`,
 a slice per slice asked, each member's values at the total of the other axis (and `childCount` with
 `childCounts`, and `"found": [3, -1]` with the places of the members `find` names; `sortBySummary` is `null`
-for the levels' own order, its `path` names a member of the other axis by its `levels`). `{ "kind": "counts", …, "levels", "paths" }` is answered with
+for the levels' own order, its `path` names a member of the other axis by its `levels`). With `"nonEmpty": true`
+the members whose measures are all empty are left out of the answer: of `members`, `total`, `childCount` and
+`found` (-1). `{ "kind": "counts", …, "levels", "paths", "measures", "nonEmpty" }` is answered with
 `{ "counts": [{ "path": ["France"], "count": 11 }] }`, the number of each member's children on the next
-level, and `{ "kind": "cells", …, "rows", "columns", "measures", "rowPaths", "columnPaths" }` with the
+level (with `nonEmpty`, of those whose measures are not all empty), and `{ "kind": "cells", …, "rows", "columns", "measures", "rowPaths", "columnPaths" }` with the
 groups of every row path and column path asked, as for a whole pivot; a body with `running` may be answered
 with each group's `running` too (and the crossings no row falls in, `count` 0), or without them, which the
 adapter then adds up. `writePart` and `readPart` change them. A server that holds the rows answers with the
