@@ -118,6 +118,39 @@ kept or left out with them. A backend that computes pivots (`capabilities.pivot`
 OData with `aggregation`, REST with `pivot`) is asked for the groups (`PivotGroup`); otherwise the matching
 rows are loaded and `queryPivot` groups them in memory.
 
+A view that shows a part of a large pivot loads it in parts as it scrolls, never the whole result:
+
+```ts
+// The 101st to 200th customers of France, by their freight, largest first; and how many there are.
+const m = await source.loadPivotMembers({
+  levels: [{ field: 'ShipCountry' }, { field: 'CustomerID', dir: 'desc' }],
+  slices: [{ parent: ['France'], skip: 100, take: 100 }],
+  measures: [{ type: 'sum', field: 'Freight' }],
+  sortBySummary: { measure: 0 },
+});
+m.slices[0].total;   // every customer of France
+m.slices[0].members; // [{ key, path, count, values }] — values at the total of the columns
+// Where members shown open stand: the number of their children.
+const c = await source.loadPivotCounts({ levels, paths: [[], ['France']] });
+// The values where those rows and the columns on screen cross, totals included.
+const v = await source.loadPivotCells({ rows: levels, columns, measures, rowPaths, columnPaths });
+v.values(['France', 'BLONP'], [1997]);
+```
+
+`loadPivotMembers` gives a part of each slice's parent's children, in `loadPivot`'s order (the level's
+`dir`, empty values last) or by a measure (`sortBySummary`: at the total of the other axis, or in one of
+its members by `levels` and `path`; members without a value last, ties in their order), with the number
+of all of them; `childCounts` counts each member's children too. `loadPivotCounts` gives the number of
+children of members, and `loadPivotCells` the measures of every row path with every column path, each
+member at its depth (`[]` is a total). Members are found by their keys the way members are told apart
+(text without case, dates by day). A backend with `capabilities.pivotWindow` (OData with `aggregation`,
+REST with `pivot` unless `window: false`) computes them; otherwise the rows are loaded and grouped in
+memory, as for `loadPivot`. OData pages with `$orderby`, `$skip`, `$top` and `$count`, asks for the empty
+member apart (a service orders empty values its own way), and orders by a measure in two rounds: the
+groups its value tells apart (a sum above, at and below 0; another measure with and without a value) are
+counted, then paged. Ordered by a measure in a member of the other axis, it reads every member of the
+parent and orders them here.
+
 **Filters are plain data:** `data.where(field, op, value)` joined with `data.and`, `data.or`, `data.not`. Operators: `=`
 `<>` `<` `<=` `>` `>=` `contains` `notcontains` `startswith` `endswith` `between` `in` `notin`
 `isblank` `isnotblank`. `data.none()` is a filter no row passes. A field that holds a list of values
@@ -211,7 +244,8 @@ ask for it again; in `'all'` it follows every change of the rows. `'blocks'` doe
 For a view that needs other values than the source's own, `loadGroups(group, { groupSummary })` gives
 the groups of the current query with their counts and those summaries, without rows, and
 `loadSummary(items)` the summary values of the current query over every matching row, and
-`loadPivot(options)` a pivot of the current query; none of them touches the rows the source holds. An
+`loadPivot(options)` a pivot of the current query (and `loadPivotMembers`, `loadPivotCounts` and
+`loadPivotCells` its parts); none of them touches the rows the source holds. An
 item's `skipEmpty: false` counts empty values as 0 in `sum` and `avg` (memory only), and the evaluate
 context's `summaryValue` reads a field through a function.
 
@@ -316,6 +350,24 @@ total of its axis. From depth 2 a group is sent only under a member that is expa
 here the cities of France only. `method`, `write` and `read` change the request and how the answer is
 read. `keep` lists the members kept, each a path of keys through the field's `intervals`. Computed
 values and custom measures cannot be sent: such a pivot is grouped in memory.
+
+The same endpoint answers the parts a view loads as it scrolls, the body marked with `kind`
+(`defaultPivotPartBody`; `window: false` for an endpoint that only answers whole pivots):
+
+```json
+{ "kind": "members", "filter": null, "keep": [], "levels": [{ "field": "ShipCountry" }, { "field": "CustomerID", "dir": "desc" }],
+  "slices": [{ "parent": ["France"], "skip": 100, "take": 100 }], "measures": [{ "type": "sum", "field": "Freight" }],
+  "sortBySummary": { "measure": 0, "levels": [], "path": [] }, "childCounts": false }
+```
+
+answered with `{ "slices": [{ "total": 11, "members": [{ "key": "BLONP", "count": 7, "values": [105.3] }] }] }`,
+a slice per slice asked, each member's values at the total of the other axis (and `childCount` with
+`childCounts`; `sortBySummary` is `null` for the levels' own order, its `path` names a member of the other
+axis by its `levels`). `{ "kind": "counts", …, "levels", "paths" }` is answered with
+`{ "counts": [{ "path": ["France"], "count": 11 }] }`, the number of each member's children on the next
+level, and `{ "kind": "cells", …, "rows", "columns", "measures", "rowPaths", "columnPaths" }` with the
+groups of every row path and column path asked, as for a whole pivot. `writePart` and `readPart` change
+them.
 
 ## ODataAdapter
 

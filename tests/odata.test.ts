@@ -506,3 +506,144 @@ describe('ODataAdapter pivots', () => {
     expect([service.calls[0].query.$apply, result.summary]).toEqual(['aggregate(city with countdistinct as s0)', [2]]);
   });
 });
+
+describe('ODataAdapter pivot windows', () => {
+  type Sale = { id: number; region: string | null; city: string; day: string; amount: number | null };
+  const sales: Sale[] = [
+    { id: 1, region: 'North', city: 'Oslo', day: '2023-06-01', amount: 30 },
+    { id: 2, region: 'North', city: 'Bergen', day: '2024-02-03', amount: 10 },
+    { id: 3, region: 'South', city: 'Rome', day: '2024-08-15', amount: 20 },
+    { id: 4, region: null, city: 'Nowhere', day: '2024-01-01', amount: 5 },
+  ];
+  const sales$ = (service: ReturnType<typeof fakeService>, aggregation: data.ODataAdapterOptions<Sale, number>['aggregation'], more: Partial<data.ODataAdapterOptions<Sale, number>> = {}) =>
+    new ODataAdapter<Sale, number>({ url: 'https://host/odata/Sales', key: 'id', locale: 'en-US', fields: { day: 'date' }, fetch: service.fetch, aggregation, ...more });
+  /** Answers by `$apply` and the query options after it; a read without `$apply` with the rows. */
+  const serviceOf = (answers: Record<string, unknown>) =>
+    fakeService((call) => {
+      const key = [call.query.$apply, call.query.$orderby, call.query.$skip, call.query.$top].filter((part) => part !== undefined).join(' | ');
+      return call.query.$apply ? json(answers[key] ?? { value: [] }) : json({ value: sales });
+    });
+  const queries = (service: ReturnType<typeof fakeService>) =>
+    service.calls.map((c) => [c.query.$apply, c.query.$orderby, c.query.$skip, c.query.$top, c.query.$count].filter((part) => part !== undefined).join(' | '));
+  const sum = 'aggregate($count as _n,amount with sum as _m0)';
+  const region = { field: 'region' } as const;
+  const keysOf = (r: data.PivotMembersResult) => r.slices.map((s) => [s.total, s.members.map((m) => [m.key, m.count, ...m.values])]);
+
+  it('pages the members on the service in their order, the empty one last on its own', async () => {
+    const service = serviceOf({
+      [`filter(region ne null)/groupby((region),${sum}) | region asc | 1 | 3`]: { '@odata.count': 3, value: [{ region: 'North', _n: 2, _m0: 40 }, { region: 'South', _n: 1, _m0: 20 }] },
+      [`filter(region eq null)/${sum}`]: { value: [{ _n: 1, _m0: 5 }] },
+    });
+    const adapter = sales$(service, true);
+    expect(adapter.capabilities.pivotWindow).toBe(true);
+    const r = await adapter.loadPivotMembers({ levels: [region], slices: [{ parent: [], skip: 1, take: 3 }], measures: [{ type: 'sum', field: 'amount' }] });
+    expect(queries(service)).toEqual([`filter(region ne null)/groupby((region),${sum}) | region asc | 1 | 3 | true`, `filter(region eq null)/${sum}`]);
+    expect(keysOf(r)).toEqual([[4, [['North', 2, 40], ['South', 1, 20], [null, 1, 5]]]]);
+    // A service with no rows without a value has no empty member.
+    const none = await sales$(serviceOf({ [`filter(region ne null)/groupby((region),${sum}) | region asc | 1`]: { '@odata.count': 0, value: [] } }), true).loadPivotMembers({
+      levels: [region],
+      slices: [{ parent: [], skip: 0, take: 1 }],
+      measures: [{ type: 'sum', field: 'amount' }],
+    });
+    expect(keysOf(none)).toEqual([[0, []]]);
+  });
+
+  it('gives the children of a member of computed levels, with the number of their own children', async () => {
+    const compute = 'compute(year(day) as _r0,(month(day) add 2) div 3 as _r1)';
+    const service = serviceOf({
+      [`${compute}/filter(_r0 eq 2024)/filter(_r1 ne null)/groupby((_r0,_r1),aggregate($count as _n)) | _r1 desc`]: { '@odata.count': 2, value: [{ _r0: 2024, _r1: 3, _n: 1 }, { _r0: 2024, _r1: 1, _n: 2 }] },
+      'compute(year(day) as _r0,(month(day) add 2) div 3 as _r1,month(day) as _r2)/filter(_r0 eq 2024)/groupby((_r0,_r1,_r2))/groupby((_r0,_r1),aggregate($count as _c))': {
+        value: [{ _r0: 2024, _r1: 1, _c: 2 }, { _r0: 2024, _r1: 3, _c: 1 }],
+      },
+    });
+    const levels: data.PivotLevel[] = [{ field: 'day', interval: 'year' }, { field: 'day', interval: 'quarter', dir: 'desc' }, { field: 'day', interval: 'month' }];
+    const r = await sales$(service, { compute: true }).loadPivotMembers({ levels, slices: [{ parent: [2024] }], childCounts: true });
+    expect(r.slices[0].members.map((m) => [m.path, m.count, m.childCount])).toEqual([
+      [[2024, 3], 1, 1],
+      [[2024, 1], 2, 2],
+    ]);
+    expect(queries(service)[1]).toBe(`${compute}/filter(_r0 eq 2024)/filter(_r1 eq null)/aggregate($count as _n)`);
+  });
+
+  it('orders by a measure in groups its value tells apart, the empty member placed by its value; by a measure in a member of the other axis here', async () => {
+    const listed = `filter(region ne null)/groupby((region),${sum})`;
+    const service = serviceOf({
+      // Counted first: a sum above, at and below 0, and the empty member.
+      [`${listed}/filter(_m0 gt 0) | 0`]: { '@odata.count': 2, value: [] },
+      [`${listed}/filter(_m0 eq 0 or _m0 eq null) | 0`]: { '@odata.count': 2, value: [] },
+      [`${listed}/filter(_m0 lt 0) | 0`]: { '@odata.count': 0, value: [] },
+      [`filter(region eq null)/${sum}`]: { value: [{ _n: 1, _m0: 5 }] },
+      // Then the pages the part reaches.
+      [`${listed}/filter(_m0 gt 0) | _m0 desc,region desc | 2`]: { value: [{ region: 'North', _n: 2, _m0: 40 }, { region: 'South', _n: 1, _m0: 20 }] },
+      [`${listed}/filter(_m0 eq 0 or _m0 eq null) | region desc | 2`]: { value: [{ region: 'West', _n: 1, _m0: null }, { region: 'East', _n: 1, _m0: 0 }] },
+      [`groupby((region),${sum})`]: { value: [{ region: 'South', _n: 1, _m0: 20 }, { region: 'North', _n: 2, _m0: 40 }, { region: null, _n: 1, _m0: 5 }] },
+      'compute(year(day) as _c0)/filter(_c0 eq 2024)/groupby((region),aggregate(amount with sum as _s))': { value: [{ region: 'South', _s: 20 }, { region: 'North', _s: 10 }] },
+    });
+    const adapter = sales$(service, { compute: true });
+    const measures: data.PivotMeasure[] = [{ type: 'sum', field: 'amount' }];
+    const atTotal = await adapter.loadPivotMembers({ levels: [{ ...region, dir: 'desc' }], slices: [{ parent: [], skip: 1 }], measures, sortBySummary: { measure: 0 } });
+    // North 40, South 20, the empty region 5, then the sums of 0 (an empty sum is 0) in the order of their names.
+    expect(keysOf(atTotal)).toEqual([[5, [['South', 1, 20], [null, 1, 5], ['West', 1, 0], ['East', 1, 0]]]]);
+    expect(service.calls.filter((c) => c.query.$top !== '0' && c.query.$apply.startsWith(listed))).toHaveLength(2);
+    // In 2024: North 10, South 20; the empty region has no row then and goes last.
+    const in2024 = await adapter.loadPivotMembers({ levels: [region], slices: [{ parent: [] }], measures, sortBySummary: { measure: 0, levels: [{ field: 'day', interval: 'year' }], path: [2024] } });
+    expect(in2024.slices[0].members.map((m) => m.key)).toEqual(['North', 'South', null]);
+
+    // On a tie, the empty member comes after the others, read one before the part to find its place.
+    const tie = serviceOf({
+      [`${listed}/filter(_m0 lt 0) | 0`]: { '@odata.count': 0, value: [] },
+      [`${listed}/filter(_m0 eq 0 or _m0 eq null) | 0`]: { '@odata.count': 0, value: [] },
+      [`${listed}/filter(_m0 gt 0) | 0`]: { '@odata.count': 3, value: [] },
+      [`filter(region eq null)/${sum}`]: { value: [{ _n: 1, _m0: 20 }] },
+      [`${listed}/filter(_m0 gt 0) | _m0 asc,region asc | 1 | 2`]: { value: [{ region: 'South', _n: 1, _m0: 20 }, { region: 'West', _n: 1, _m0: 30 }] },
+    });
+    const ties = await sales$(tie, true).loadPivotMembers({ levels: [region], slices: [{ parent: [], skip: 2, take: 2 }], measures, sortBySummary: { measure: 0 } });
+    // Asc: East 10, South 20, the empty region 20, West 30: the part from 2 is the empty region and West.
+    expect(keysOf(ties)).toEqual([[4, [[null, 1, 20], ['West', 1, 30]]]]);
+  });
+
+  it('counts children with groupby over groupby, by the depth of the members', async () => {
+    const service = serviceOf({
+      'groupby((region))/aggregate($count as _c)': { value: [{ _c: 3 }] },
+      "filter((region eq 'North') or (region eq 'South'))/groupby((region,city))/groupby((region),aggregate($count as _c))": { value: [{ region: 'North', _c: 2 }, { region: 'South', _c: 1 }] },
+    });
+    const r = await sales$(service, true).loadPivotCounts({ levels: [region, { field: 'city' }], paths: [[], ['North'], ['South']] });
+    expect([r.childCount([]), r.childCount(['North']), r.childCount(['South']), r.childCount(['West'])]).toEqual([3, 2, 1, 0]);
+    expect(service.calls).toHaveLength(2);
+  });
+
+  it('asks for the crossings by pairs of depths, a long list of members in several reads', async () => {
+    const service = serviceOf({
+      [sum]: { value: [{ _n: 4, _m0: 65 }] },
+      [`compute(year(day) as _c0)/filter(_c0 eq 2024)/groupby((_c0),${sum})`]: { value: [{ _c0: 2024, _n: 3, _m0: 35 }] },
+      [`filter(region eq 'North')/groupby((region),${sum})`]: { value: [{ region: 'North', _n: 2, _m0: 40 }] },
+      [`compute(year(day) as _c0)/filter(region eq 'North')/filter(_c0 eq 2024)/groupby((region,_c0),${sum})`]: { value: [{ region: 'North', _c0: 2024, _n: 1, _m0: 10 }] },
+    });
+    const adapter = sales$(service, { compute: true });
+    const cells = await adapter.loadPivotCells({ rows: [region], columns: [{ field: 'day', interval: 'year' }], measures: [{ type: 'sum', field: 'amount' }], rowPaths: [[], ['North']], columnPaths: [[], [2024]] });
+    expect(service.calls).toHaveLength(4);
+    expect([cells.values([], []), cells.values([], [2024]), cells.values(['North'], []), cells.values(['North'], [2024]), cells.count(['North'], [2024])]).toEqual([[65], [35], [40], [10], 1]);
+    service.calls.length = 0;
+    const many = Array.from({ length: 200 }, (_, i) => [`Region ${i}`]);
+    await adapter.loadPivotCells({ rows: [region], columns: [], measures: [], rowPaths: many, columnPaths: [[]] });
+    expect(service.calls.length).toBeGreaterThan(1);
+    expect(service.calls.every((c) => c.query.$apply.length < 1700)).toBe(true);
+    expect(service.calls.map((c) => c.query.$apply.match(/region eq/g)!.length).reduce((a, b) => a + b)).toBe(200);
+  });
+
+  it('sends every read of a part in one $batch, and groups in memory what the service cannot', async () => {
+    const ok = (body: unknown, id: string) => httpPart('200 OK', { 'Content-Type': 'application/json' }, body, id);
+    const service = fakeService((call) =>
+      call.method === 'POST' ? batchAnswer('b', [ok({ '@odata.count': 1, value: [{ region: 'North', _n: 2 }] }, '1'), ok({ value: [{ _n: 0 }] }, '2')]) : json({ value: sales }),
+    );
+    const adapter = sales$(service, { batch: true }, { batch: { url: 'https://host/odata/$batch' } });
+    const r = await adapter.loadPivotMembers({ levels: [region], slices: [{ parent: [] }] });
+    expect(service.calls).toHaveLength(1);
+    expect(service.calls[0].body).toContain('GET https://host/odata/Sales?$apply=filter(region%20ne%20null)/groupby((region),aggregate($count%20as%20_n))&$orderby=region%20asc&$count=true HTTP/1.1');
+    expect(keysOf(r)).toEqual([[1, [['North', 2]]]]);
+    // No OData function tells the day of the week: the rows come, and memory groups them.
+    service.calls.length = 0;
+    const weekdays = await adapter.loadPivotMembers({ levels: [{ field: 'day', interval: 'dayOfWeek' }], slices: [{ parent: [] }] });
+    expect([service.calls.map((c) => c.query.$apply), weekdays.slices[0].total]).toEqual([[undefined], 3]);
+  });
+});

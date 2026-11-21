@@ -8,9 +8,13 @@ import { HttpAdapter } from '../http/http-adapter';
 import { requestParams } from '../http/request-params';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import type { PivotCellsOptions } from '../query/pivot-cells-options';
+import type { PivotCountsOptions } from '../query/pivot-counts-options';
 import type { PivotLoadOptions } from '../query/pivot-load-options';
+import type { PivotMembersOptions } from '../query/pivot-members-options';
 import type { RestAdapterOptions } from './rest-adapter-options';
-import { defaultLoadQuery, defaultPivotBody, defaultReadPivot, defaultReadRows, defaultReadSaved } from './rest-defaults';
+import { defaultLoadQuery, defaultPivotBody, defaultPivotPartBody, defaultReadPivot, defaultReadPivotPart, defaultReadRows, defaultReadSaved } from './rest-defaults';
+import type { RestPivotPart, RestPivotPartOptions } from './rest-pivot-part';
 
 /**
  * A REST endpoint: `GET url` loads, `GET url/key` finds, `POST url` inserts, `PATCH url/key` updates,
@@ -27,7 +31,8 @@ export class RestAdapter<T = Record<string, unknown>, K = unknown> extends HttpA
   }
 
   protected backendCapabilities(): Capabilities {
-    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary: false, pivot: !!this.rest.pivot, insert: true, update: true, remove: true };
+    const pivot = !!this.rest.pivot;
+    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary: false, pivot, pivotWindow: pivot && this.rest.pivot!.window !== false, insert: true, update: true, remove: true };
   }
 
   protected async loadRows(options: LoadOptions): Promise<LoadResult<T>> {
@@ -42,6 +47,30 @@ export class RestAdapter<T = Record<string, unknown>, K = unknown> extends HttpA
     const response = await this.send({ operation: 'load', method: pivot.method ?? 'POST', url: pivot.url, data, query: requestParams(options), signal: options.signal });
     try {
       return (pivot.read ?? defaultReadPivot)(response.body, options);
+    } catch (error) {
+      throw DataError.create('MJD104', { operation: 'load', details: response.body, cause: error }, (error as Error).message);
+    }
+  }
+
+  protected override loadPivotMemberSlices(options: PivotMembersOptions<T>): Promise<unknown> {
+    return this.loadPivotPart('members', options);
+  }
+
+  protected override loadPivotChildCounts(options: PivotCountsOptions<T>): Promise<unknown> {
+    return this.loadPivotPart('counts', options);
+  }
+
+  protected override loadPivotCellGroups(options: PivotCellsOptions<T>): Promise<unknown> {
+    return this.loadPivotPart('cells', options);
+  }
+
+  // A part of a pivot from the pivot endpoint, its body marked with `kind`.
+  private async loadPivotPart(kind: RestPivotPart, options: RestPivotPartOptions<T>): Promise<unknown> {
+    const pivot = this.rest.pivot!;
+    const data = (pivot.writePart ?? defaultPivotPartBody)(kind, options);
+    const response = await this.send({ operation: 'load', method: pivot.method ?? 'POST', url: pivot.url, data, query: requestParams(options), signal: options.signal });
+    try {
+      return (pivot.readPart ?? defaultReadPivotPart)(kind, response.body, options);
     } catch (error) {
       throw DataError.create('MJD104', { operation: 'load', details: response.body, cause: error }, (error as Error).message);
     }

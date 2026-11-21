@@ -10,8 +10,14 @@ import { queryArray } from '../query/local-query';
 import type { EvaluateContext } from '../query/evaluate-context';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import type { PivotCellsOptions } from '../query/pivot-cells-options';
+import type { PivotCellsResult } from '../query/pivot-cells-result';
+import type { PivotCountsOptions } from '../query/pivot-counts-options';
+import type { PivotCountsResult } from '../query/pivot-counts-result';
 import type { PivotLoadOptions } from '../query/pivot-load-options';
 import type { PivotLoadResult } from '../query/pivot-load-result';
+import type { PivotMembersOptions } from '../query/pivot-members-options';
+import type { PivotMembersResult } from '../query/pivot-members-result';
 import type { RowGroup } from '../query/row-group';
 import { createRowFilter } from '../query/row-filter';
 import { sortRows } from '../query/sort';
@@ -274,8 +280,28 @@ export class DataSource<T = Record<string, unknown>, K = unknown> extends Dispos
    * `DataAdapter.loadPivot`). The rows the source holds stay as they are. A failure rejects.
    */
   loadPivot(options: PivotLoadOptions<T> = {}): Promise<PivotLoadResult> {
+    return this.adapter.loadPivot(this.pivotQuery(options));
+  }
+
+  /** Members of one level of a pivot axis over the current query (see `DataAdapter.loadPivotMembers`). */
+  loadPivotMembers(options: PivotMembersOptions<T>): Promise<PivotMembersResult> {
+    return this.adapter.loadPivotMembers(this.pivotQuery(options));
+  }
+
+  /** The number of children of members of a pivot axis over the current query (see `DataAdapter.loadPivotCounts`). */
+  loadPivotCounts(options: PivotCountsOptions<T>): Promise<PivotCountsResult> {
+    return this.adapter.loadPivotCounts(this.pivotQuery(options));
+  }
+
+  /** The measures where some row and column members cross, over the current query (see `DataAdapter.loadPivotCells`). */
+  loadPivotCells(options: PivotCellsOptions<T>): Promise<PivotCellsResult> {
+    return this.adapter.loadPivotCells(this.pivotQuery(options));
+  }
+
+  /** A pivot's options over the current query: its filter with the pivot's own, and its params and expand unless the pivot has its own. */
+  private pivotQuery<O extends { filter?: FilterExpression | null; params?: Readonly<Record<string, unknown>>; expand?: readonly string[] }>(options: O): O {
     const { filter, params, expand } = this.loadOptions(false);
-    return this.adapter.loadPivot({ ...options, filter: and(filter, options.filter), params: options.params ?? params, expand: options.expand ?? expand });
+    return { ...options, filter: and(filter, options.filter), params: options.params ?? params, expand: options.expand ?? expand };
   }
 
   /** Loads the rows again, keeping the page or the view. Until they arrive, `'all'` and `'page'` keep the old ones. */

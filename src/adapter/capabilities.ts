@@ -9,6 +9,8 @@ export interface Capabilities {
   summary: boolean;
   /** Pivots (`loadPivot`); missing means no. */
   pivot?: boolean;
+  /** The parts of a pivot a view loads as it scrolls (`loadPivotMembers`, `loadPivotCounts`, `loadPivotCells`); missing means no. */
+  pivotWindow?: boolean;
   insert: boolean;
   update: boolean;
   remove: boolean;

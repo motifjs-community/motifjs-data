@@ -169,7 +169,7 @@ export function intervalValue(value: unknown, interval: PivotInterval | undefine
 }
 
 /** Whether a row is kept by `keep`: its member on one of the levels the intervals make is one of the paths, or `filter` passes it. */
-function keeper<T>(keep: PivotKeep<T>, ctx: EvaluateContext): (row: T) => boolean {
+export function keeper<T>(keep: PivotKeep<T>, ctx: EvaluateContext): (row: T) => boolean {
   const intervals: readonly (PivotInterval | undefined)[] = keep.intervals?.length ? keep.intervals : [undefined];
   const axis = new PivotAxis<T>(intervals.map((interval) => ({ field: keep.field, interval, value: keep.value })), ctx);
   const ids = new Set(keep.paths.filter((path) => path.length && path.length <= intervals.length).map((path) => axis.idOf(path)));
@@ -193,7 +193,7 @@ interface MemberNode {
 }
 
 /** One axis of a pivot: how a row's members are read and told apart, and how members are ordered. */
-class PivotAxis<T> {
+export class PivotAxis<T> {
   private readonly readers: ((row: T) => unknown)[];
   private readonly own: boolean[];
   private readonly comparers: (ValueComparer | undefined)[] = [];
@@ -229,6 +229,15 @@ class PivotAxis<T> {
       if (ids.has(id)) return true;
     }
     return false;
+  }
+
+  /** A row's members as ids, on every level from the top: the ids of the paths down to level 1, 2 … written into `out`. */
+  ids(row: T, out: string[]): void {
+    let id = '';
+    for (let i = 0; i < this.levels.length; i++) {
+      id += `\u0001${partOf(this.knownComparable(i, intervalValue(this.readers[i](row), this.levels[i].interval)))}`;
+      out[i] = id;
+    }
   }
 
   /** Memory: the members a row is shown in, the root first, written into `out`; returns their number. */
@@ -282,6 +291,11 @@ class PivotAxis<T> {
     return c;
   }
 
+  /** The order of two keys of a level, as members are ordered: by the level's `dir`, the empty one last either way. */
+  compare(level: number, a: unknown, b: unknown): number {
+    return this.order(level)({ key: a, path: [], count: 0 }, { key: b, path: [], count: 0 });
+  }
+
   private order(level: number): (a: PivotMember, b: PivotMember) => number {
     const { dir, field, interval } = this.levels[level];
     const sign = dir === 'desc' ? -1 : 1;
@@ -321,7 +335,7 @@ function pathId(path: readonly unknown[]): string {
   return id;
 }
 
-function measureRule<T>(measure: PivotMeasure<T>, ctx: EvaluateContext): { value(row: unknown): unknown; start(): SummaryAccumulator } {
+export function measureRule<T>(measure: PivotMeasure<T>, ctx: EvaluateContext): { value(row: unknown): unknown; start(): SummaryAccumulator } {
   const own = measure.value as ((row: unknown) => unknown) | undefined;
   if (measure.type !== 'custom') return new SummaryRule(measure, ctx, own);
   const field = measure.field;
@@ -340,7 +354,7 @@ function measureRule<T>(measure: PivotMeasure<T>, ctx: EvaluateContext): { value
   };
 }
 
-function readKey(key: unknown, level: PivotLevel<any> | undefined, fields: Readonly<Record<string, FieldType>>): unknown {
+export function readKey(key: unknown, level: PivotLevel<any> | undefined, fields: Readonly<Record<string, FieldType>>): unknown {
   if (isEmpty(key)) return null;
   if (!level) return key;
   if (level.interval === 'date') return toDate(key) ?? key;
@@ -350,7 +364,7 @@ function readKey(key: unknown, level: PivotLevel<any> | undefined, fields: Reado
   return type === 'number' ? Number(key) : key;
 }
 
-function readValue(value: unknown, measure: PivotMeasure<any>): unknown {
+export function readValue(value: unknown, measure: PivotMeasure<any>): unknown {
   if (measure.type === 'count' || measure.type === 'countDistinct' || measure.type === 'sum') return Number(value ?? 0);
   if (measure.type === 'avg') return value === null ? null : Number(value);
   return value;

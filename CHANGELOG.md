@@ -31,6 +31,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   an axis or not. OData filters with its date functions, without `compute`; REST gets `keep` in the body; a keep by
   the day of the week or by a computed value runs in memory. A keep's `filter` counts the rows it passes as members
   too, kept or left out with them (OData joins it with `or`).
+- Pivots in parts, for a view that loads as it scrolls and never the whole result: `loadPivotMembers` (a part of each
+  slice's parent's children, in their order or by a measure at the other axis's total or in one of its members, with
+  the number of all of them and of their children), `loadPivotCounts` (the number of children of members) and
+  `loadPivotCells` (the measures of the row and column members asked for, totals included), on every adapter and on
+  `DataSource`. `capabilities.pivotWindow` says the backend computes them: OData with `aggregation` (paged with
+  `$orderby`, `$skip`, `$top` and `$count`; the empty member apart; ordered by a measure in two rounds, the groups its
+  value tells apart counted and then paged; a long list of members split into several reads; all in one `$batch` with
+  `aggregation.batch`), and REST with `pivot` (a body with `kind`, `defaultPivotPartBody`, `window: false` for an
+  endpoint of whole pivots only). Otherwise the rows are grouped in memory (`pivotMembers`, `pivotCounts`,
+  `pivotCells`), in the same order and with the same values as `queryPivot`.
 - The demo has a Pivot tab: 100,000 orders by city and customer down, quarter and month across, with
   four measures, members that open and close and a filter; and TripPin's people counted with `$apply`, in
   one `$batch` or not, checked against the memory engine. In Chrome on a desktop machine the first pivot

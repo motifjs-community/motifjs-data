@@ -267,6 +267,39 @@ describe('RestAdapter pivots', () => {
     expect((api.calls[0].body as { keep: unknown }).keep).toEqual([{ field: 'customer', intervals: [], paths: [['c1']], type: 'include', filter: { field: 'amount', op: '>', value: 20 } }]);
   });
 
+  it('asks the pivot endpoint for the parts a view loads, each body marked with its kind', async () => {
+    const api = fakeApi(orders(4));
+    api.answer((call) => {
+      if (call.url.pathname !== '/api/orders/pivot') return undefined;
+      const kind = (call.body as { kind: string }).kind;
+      if (kind === 'members') return json({ slices: [{ total: 4, members: [{ key: 'c1', count: 1, values: ['10'], childCount: 0 }] }] });
+      if (kind === 'counts') return json({ counts: [{ path: [], count: 4 }] });
+      return json({ groups: [{ rows: ['c1'], columns: [], count: 1, values: [10] }] });
+    });
+    const adapter = make(api, { pivot: { url: '/api/orders/pivot' } });
+    expect(adapter.capabilities.pivotWindow).toBe(true);
+    const sum = { type: 'sum', field: 'amount' } as const;
+    const members = await adapter.loadPivotMembers({ filter: where('amount', '<', 100), levels: [{ field: 'customer', dir: 'desc' }], slices: [{ parent: [], skip: 1, take: 1 }], measures: [sum], params: { tenant: 'a' } });
+    expect([api.calls[0].method, api.calls[0].url.searchParams.get('tenant')]).toEqual(['POST', 'a']);
+    expect(api.calls[0].body).toEqual({
+      kind: 'members',
+      filter: { field: 'amount', op: '<', value: 100 },
+      keep: [],
+      levels: [{ field: 'customer', dir: 'desc' }],
+      slices: [{ parent: [], skip: 1, take: 1 }],
+      measures: [{ type: 'sum', field: 'amount' }],
+      sortBySummary: null,
+      childCounts: false,
+    });
+    expect(members.slices[0].members.map((m) => [m.key, m.values, m.childCount])).toEqual([['c1', [10], 0]]);
+    const counts = await adapter.loadPivotCounts({ levels: [{ field: 'customer' }], paths: [[]] });
+    expect([api.calls[1].body, counts.childCount([])]).toEqual([{ kind: 'counts', filter: null, keep: [], levels: [{ field: 'customer' }], paths: [[]] }, 4]);
+    const cells = await adapter.loadPivotCells({ rows: [{ field: 'customer' }], columns: [], measures: [sum], rowPaths: [['c1']], columnPaths: [[]] });
+    expect([(api.calls[2].body as { kind: string }).kind, cells.values(['c1'], [])]).toEqual(['cells', [10]]);
+    // An endpoint of whole pivots only: a view loads the pivot whole.
+    expect(make(api, { pivot: { url: '/api/orders/pivot', window: false } }).capabilities.pivotWindow).toBe(false);
+  });
+
   it('writes and reads the endpoint its own way, and groups in memory without one', async () => {
     const api = fakeApi(orders(4));
     api.answer((call) => (call.url.pathname === '/api/pivot' ? json([{ rows: [], columns: [], count: 4, values: [] }]) : undefined));

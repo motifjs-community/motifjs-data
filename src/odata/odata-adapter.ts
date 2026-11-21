@@ -16,11 +16,17 @@ import type { FieldType } from '../query/field-type';
 import { or, where } from '../query/filter-builders';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
-import { type PivotDepth, pivotDepths } from '../query/pivot';
+import type { FilterExpression } from '../query/filter-expression';
+import { type PivotDepth, pivotDepths, readValue } from '../query/pivot';
+import type { PivotCellsOptions } from '../query/pivot-cells-options';
+import type { PivotCountsOptions } from '../query/pivot-counts-options';
 import type { PivotGroup } from '../query/pivot-group';
 import type { PivotKeep } from '../query/pivot-keep';
 import type { PivotLevel } from '../query/pivot-level';
 import type { PivotLoadOptions } from '../query/pivot-load-options';
+import type { PivotMeasure } from '../query/pivot-measure';
+import type { PivotMembersOptions } from '../query/pivot-members-options';
+import { bySummary, inLevelOrder } from '../query/pivot-window';
 import { fieldTypeOf, getField, isObject } from '../query/values';
 import type { BatchRequestPart } from './batch-request-part';
 import type { BatchResponsePart } from './batch-response-part';
@@ -32,6 +38,14 @@ import { dayText, odataExpand, odataLiteral, odataPath } from './odata-syntax';
 // Sent with writes only: a read with no custom header needs no CORS preflight.
 const ODATA_HEADERS = { 'OData-Version': '4.0', 'OData-MaxVersion': '4.0' };
 const AGGREGATE = { count: '', countDistinct: 'countdistinct', sum: 'sum', min: 'min', max: 'max', avg: 'average' } as const;
+// The members one request names in its filter, as text; more go in another request, so that its address stays short.
+const PATHS_TEXT = 1500;
+
+/** A member of a slice as the service lists it. */
+type Listed = { key: unknown; count: number; values: unknown[]; childCount?: number };
+
+/** Members a measure orders, one part of their order: its filter on the measure, its `$orderby`, and which values it holds. */
+type SummaryGroup = { filter: string | null; orderby: string; byValue: boolean; role: 'any' | 'none' | 'above' | 'zero' | 'below' };
 
 /** A level a pivot request groups by, with the name its value has in the answer when it is computed. */
 type GroupedLevel<T> = { level: PivotLevel<T>; alias: string };
@@ -56,7 +70,7 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
 
   protected backendCapabilities(): Capabilities {
     const aggregation = !!this.odata.aggregation;
-    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary: aggregation, pivot: aggregation, insert: true, update: true, remove: true };
+    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary: aggregation, pivot: aggregation, pivotWindow: aggregation, insert: true, update: true, remove: true };
   }
 
   protected override pivotRemotely(options: PivotLoadOptions<T>): boolean {
@@ -75,14 +89,226 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
         pivotDepths(options.columns ?? [], options.expandedColumns).map((c) => ({ rows: r.depth, columns: c.depth, apply: this.pivotApply(options, r, c) })),
       ),
     );
-    const applies = pairs.map((p) => p.apply);
-    const read = async (apply: string) => (await this.send({ operation: 'load', method: 'GET', url: this.url, query: { $apply: apply, ...requestParams(options) }, signal: options.signal })).body;
-    const bodies = this.aggregationOptions.batch && applies.length > 1 ? await this.sendReads(applies, options) : await Promise.all(applies.map(read));
-    return bodies.flatMap((body, i) => {
-      const value = (body as { value?: unknown } | null)?.value;
-      if (!Array.isArray(value)) throw DataError.create('MJD104', { operation: 'load', details: body }, 'no "value" array');
-      return value.map((record: Record<string, unknown>) => this.pivotGroup(record, options, pairs[i].rows, pairs[i].columns));
+    const bodies = await this.readApplied(
+      pairs.map((p) => ({ $apply: p.apply })),
+      options,
+    );
+    return bodies.flatMap((body, i) => recordsOf(body).map((record) => this.pivotGroup(record, options, pairs[i].rows, pairs[i].columns)));
+  }
+
+  // The members of each slice: `filter(…)/filter(Region eq 'East')/filter(City ne null)/groupby((Region,City),aggregate(…))`
+  // with `$orderby`, `$skip`, `$top` and `$count`, and the empty member on its own, last. A service orders empty values
+  // its own way, so they never reach `$orderby`: ordered by a measure, the members come in groups the measure's value
+  // tells apart (above, at and below 0 for a sum; with and without one for the others), counted first and paged after,
+  // and the empty member takes its place among them by its value. Ordered by a measure in a member of the other axis,
+  // every member of the parent comes and they are ordered here.
+  protected override async loadPivotMemberSlices(o: PivotMembersOptions<T>): Promise<unknown> {
+    const depth = o.slices[0].parent.length;
+    const grouped = o.levels.slice(0, depth + 1).map((level, i): GroupedLevel<T> => ({ level, alias: `_r${i}` }));
+    const member = groupedText(grouped[depth]);
+    const measures = o.measures ?? [];
+    const values = valuesText(measures);
+    const dir = o.levels[depth].dir === 'desc' ? 'desc' : 'asc';
+    const groupby = `groupby((${grouped.map(groupedText).join(',')}),aggregate(${values}))`;
+    const sort = o.sortBySummary;
+    const columns = (sort?.levels ?? []).slice(0, sort?.path?.length ?? 0).map((level, j): GroupedLevel<T> => ({ level, alias: `_c${j}` }));
+    const next = depth + 1 < o.levels.length && o.childCounts ? o.levels.slice(0, depth + 2).map((level, i): GroupedLevel<T> => ({ level, alias: `_r${i}` })) : null;
+    const groups = sort && !columns.length ? this.summaryGroups(measures, sort.measure, member, dir) : [];
+    const ctx = this.evaluateContext;
+    const keyOf = (record: Record<string, unknown>) => recordKey(record, grouped[depth]);
+    const toMember = (record: Record<string, unknown>): Listed => ({ key: keyOf(record), count: Number(record._n ?? 0), values: recordValues(record, measures) });
+    const valueOf = (m: Listed) => (sort ? rankOf(readValue(m.values[sort.measure], measures[sort.measure])) : null);
+
+    // First round: whole answers, and the numbers of the groups ordered by a measure.
+    const first: Record<string, string>[] = [];
+    const plans = o.slices.map((slice) => {
+      const steps = this.partSteps(o, grouped);
+      const under = slice.parent.length ? `filter(${this.pathText(grouped, slice.parent)})` : '';
+      if (under) steps.push(under);
+      const listed = [...steps, `filter(${member} ne null)`, groupby].join('/');
+      const plan = { at: first.length, counts: -1, listed };
+      const skip = slice.skip ?? 0;
+      if (!sort) {
+        first.push({ $apply: listed, $orderby: `${member} ${dir}`, $count: 'true', ...pageOf(skip, slice.take === undefined ? Infinity : skip + slice.take) });
+        first.push({ $apply: [...steps, `filter(${member} eq null)`, `aggregate(${values})`].join('/') });
+      } else if (columns.length) {
+        const measure = measures[sort.measure];
+        const one = measure.type === 'count' ? '$count as _s' : `${odataPath((measure as { field: string }).field)} with ${AGGREGATE[measure.type as keyof typeof AGGREGATE]} as _s`;
+        first.push({ $apply: [...steps, groupby].join('/') });
+        const both = this.partSteps(o, [...grouped, ...columns]);
+        first.push({ $apply: [...both, ...(under ? [under] : []), `filter(${this.pathText(columns, sort.path!)})`, `groupby((${grouped.map(groupedText).join(',')}),aggregate(${one}))`].join('/') });
+      } else {
+        for (const g of groups) first.push({ $apply: g.filter ? `${listed}/filter(${g.filter})` : listed, $count: 'true', $top: '0' });
+        first.push({ $apply: [...steps, `filter(${member} eq null)`, `aggregate(${values})`].join('/') });
+      }
+      if (next) {
+        plan.counts = first.length;
+        const counted = this.partSteps(o, next);
+        first.push({ $apply: [...counted, ...(under ? [under] : []), `groupby((${next.map(groupedText).join(',')}))`, `groupby((${grouped.map(groupedText).join(',')}),aggregate($count as _c))`].join('/') });
+      }
+      return plan;
     });
+    const firstBodies = await this.readApplied(first, o);
+
+    // Second round, ordered by a measure: the pages of the groups the slices reach.
+    const second: Record<string, string>[] = [];
+    const placed = o.slices.map((slice, i) => {
+      if (!sort || columns.length) return null;
+      const plan = plans[i];
+      const sizes = groups.map((_, g) => countOf(firstBodies[plan.at + g]));
+      const blank = recordsOf(firstBodies[plan.at + groups.length])[0];
+      const empty = blank && Number(blank._n ?? 0) > 0 ? { ...toMember(blank), key: null } : null;
+      const home = empty ? this.summaryHome(groups, valueOf(empty)) : -1;
+      const skip = slice.skip ?? 0;
+      const end = slice.take === undefined ? Infinity : skip + slice.take;
+      const parts: { group: number; at: number; from: number; to: number; local: [number, number] }[] = [];
+      let offset = 0;
+      groups.forEach((g, n) => {
+        const size = sizes[n] + (home === n ? 1 : 0);
+        const from = Math.max(skip - offset, 0);
+        const to = Math.min(end - offset, size);
+        offset += size;
+        if (from >= to) return;
+        // Placed by its value, the empty member may stand before the part: one member more is read in front.
+        const read: [number, number] = home === n && g.byValue ? [Math.max(0, from - 1), Math.min(to, sizes[n])] : [from, Math.min(to, sizes[n])];
+        parts.push({ group: n, at: second.length, from, to, local: read });
+        if (read[0] < read[1]) second.push({ $apply: g.filter ? `${plan.listed}/filter(${g.filter})` : plan.listed, $orderby: g.orderby, ...pageOf(read[0], read[1]) });
+        else parts[parts.length - 1].at = -1;
+      });
+      return { sizes, empty, home, parts, total: offset };
+    });
+    const secondBodies = second.length ? await this.readApplied(second, o) : [];
+
+    return {
+      slices: o.slices.map((slice, i) => {
+        const plan = plans[i];
+        const skip = slice.skip ?? 0;
+        const end = slice.take === undefined ? Infinity : skip + slice.take;
+        let total: number;
+        let members: Listed[];
+        if (!sort) {
+          const list = firstBodies[plan.at];
+          const blank = recordsOf(firstBodies[plan.at + 1]).filter((r) => Number(r._n ?? 0) > 0);
+          const listed = countOf(list);
+          total = listed + blank.length;
+          members = [...recordsOf(list).map(toMember), ...blank.map((r) => ({ ...toMember(r), key: null })).slice(Math.max(0, skip - listed), Math.max(0, end - listed))];
+        } else if (columns.length) {
+          const all = inLevelOrder(recordsOf(firstBodies[plan.at]).map(toMember), o.levels.slice(0, depth + 1), ctx);
+          const measure = measures[sort.measure];
+          const at = new Map(recordsOf(firstBodies[plan.at + 1]).map((r) => [keyText(keyOf(r)), readValue(r._s, measure)]));
+          const ordered = bySummary(all, (m) => at.get(keyText(m.key)), o.levels[depth].dir);
+          total = ordered.length;
+          members = ordered.slice(skip, end);
+        } else {
+          const p = placed[i]!;
+          total = p.total;
+          members = [];
+          for (const part of p.parts) {
+            const read = part.at < 0 ? [] : recordsOf(secondBodies[part.at]).map(toMember);
+            if (p.home !== part.group) {
+              members.push(...read);
+              continue;
+            }
+            // The empty member's place in its group: after the members before it by value, ties included.
+            const g = groups[part.group];
+            const v = valueOf(p.empty!);
+            const before = (m: Listed) => !g.byValue || summaryBefore(valueOf(m), v, dir);
+            let place = read.findIndex((m) => !before(m));
+            place = place < 0 ? (part.local[1] === p.sizes[part.group] ? p.sizes[part.group] : Infinity) : part.local[0] + place;
+            const merged: { index: number; m: Listed }[] = read.map((m, k) => ({ index: part.local[0] + k + (part.local[0] + k >= place ? 1 : 0), m }));
+            if (place !== Infinity) merged.push({ index: place, m: p.empty! });
+            members.push(...merged.filter((e) => e.index >= part.from && e.index < part.to).sort((a, b) => a.index - b.index).map((e) => e.m));
+          }
+        }
+        if (next) {
+          const counts = new Map(recordsOf(firstBodies[plan.counts]).map((r) => [keyText(keyOf(r)), Number(r._c ?? 0)]));
+          members = members.map((m) => ({ ...m, childCount: counts.get(keyText(m.key)) ?? 0 }));
+        }
+        return { total, members };
+      }),
+    };
+  }
+
+  // The groups of members a measure orders, in their order, each with its filter on the measure and its own order: a sum
+  // above, at and below 0 (an empty sum is 0); another measure with a value, then without; a count in one group. A
+  // measure of a field declared as text or a date has no value to order by, as in memory.
+  private summaryGroups(measures: readonly PivotMeasure<T>[], at: number, member: string, dir: 'asc' | 'desc'): SummaryGroup[] {
+    const measure = measures[at];
+    const sorted = measure.type === 'count' ? '_n' : `_m${at}`;
+    const byValue = { orderby: `${sorted} ${dir},${member} ${dir}`, byValue: true };
+    const byMember = { orderby: `${member} ${dir}`, byValue: false };
+    if (measure.type === 'count' || measure.type === 'countDistinct') return [{ filter: null, role: 'any', ...byValue }];
+    if (measure.type === 'sum') {
+      const above: SummaryGroup = { filter: `${sorted} gt 0`, role: 'above', ...byValue };
+      const zero: SummaryGroup = { filter: `${sorted} eq 0 or ${sorted} eq null`, role: 'zero', ...byMember };
+      const below: SummaryGroup = { filter: `${sorted} lt 0`, role: 'below', ...byValue };
+      return dir === 'desc' ? [above, zero, below] : [below, zero, above];
+    }
+    const type = measure.type === 'custom' ? undefined : this.fields[measure.field!];
+    if (measure.type !== 'avg' && type !== undefined && type !== 'number') return [{ filter: null, role: 'none', ...byMember }];
+    return [
+      { filter: `${sorted} ne null`, role: 'any', ...byValue },
+      { filter: `${sorted} eq null`, role: 'none', ...byMember },
+    ];
+  }
+
+  // The group the empty member's value puts it in.
+  private summaryHome(groups: readonly SummaryGroup[], value: number | null): number {
+    const role = groups.some((g) => g.role === 'above') ? (value === null || value === 0 ? 'zero' : value > 0 ? 'above' : 'below') : value === null ? 'none' : 'any';
+    const home = groups.findIndex((g) => g.role === role);
+    return home < 0 ? groups.length - 1 : home;
+  }
+
+  // The number of children of members, by the depth of their paths: `filter(…)/groupby((Region,City))/groupby((Region),aggregate($count as _c))`.
+  protected override async loadPivotChildCounts(o: PivotCountsOptions<T>): Promise<unknown> {
+    const reads: { query: Record<string, string>; depth: number }[] = [];
+    for (const [depth, paths] of byLength(o.paths)) {
+      const grouped = o.levels.slice(0, depth + 1).map((level, i): GroupedLevel<T> => ({ level, alias: `_r${i}` }));
+      const steps = this.partSteps(o, grouped);
+      const last = depth ? `groupby((${grouped.slice(0, depth).map(groupedText).join(',')}),aggregate($count as _c))` : 'aggregate($count as _c)';
+      for (const part of depth ? this.pathChunks(grouped, paths) : [null]) {
+        reads.push({ depth, query: { $apply: [...steps, ...(part ? [`filter(${part})`] : []), `groupby((${grouped.map(groupedText).join(',')}))`, last].join('/') } });
+      }
+    }
+    const bodies = await this.readApplied(
+      reads.map((r) => r.query),
+      o,
+    );
+    return {
+      counts: bodies.flatMap((body, i) => {
+        const depth = reads[i].depth;
+        const grouped = o.levels.slice(0, depth).map((level, k): GroupedLevel<T> => ({ level, alias: `_r${k}` }));
+        return recordsOf(body).map((record) => ({ path: grouped.map((g) => recordKey(record, g)), count: Number(record._c ?? 0) }));
+      }),
+    };
+  }
+
+  // One `$apply` per pair of depths asked for, the members named in a filter: `filter((Region eq 'East') or (…))/…`;
+  // a long list goes in several reads.
+  protected override async loadPivotCellGroups(o: PivotCellsOptions<T>): Promise<unknown> {
+    const values = valuesText(o.measures);
+    const reads: { query: Record<string, string>; rows: number; columns: number }[] = [];
+    for (const [rowDepth, rowPaths] of byLength(o.rowPaths)) {
+      for (const [columnDepth, columnPaths] of byLength(o.columnPaths)) {
+        const rows = o.rows.slice(0, rowDepth).map((level, i): GroupedLevel<T> => ({ level, alias: `_r${i}` }));
+        const columns = o.columns.slice(0, columnDepth).map((level, j): GroupedLevel<T> => ({ level, alias: `_c${j}` }));
+        const grouped = [...rows, ...columns];
+        const steps = this.partSteps(o, grouped);
+        const last = grouped.length ? `groupby((${grouped.map(groupedText).join(',')}),aggregate(${values}))` : `aggregate(${values})`;
+        for (const rowPart of rowDepth ? this.pathChunks(rows, rowPaths) : [null]) {
+          for (const columnPart of columnDepth ? this.pathChunks(columns, columnPaths) : [null]) {
+            const where = [rowPart, columnPart].filter((text): text is string => !!text).map((text) => `filter(${text})`);
+            reads.push({ rows: rowDepth, columns: columnDepth, query: { $apply: [...steps, ...where, last].join('/') } });
+          }
+        }
+      }
+    }
+    const bodies = await this.readApplied(
+      reads.map((r) => r.query),
+      o,
+    );
+    const asked = { rows: o.rows, columns: o.columns, measures: o.measures };
+    return bodies.flatMap((body, i) => recordsOf(body).map((record) => this.pivotGroup(record, asked, reads[i].rows, reads[i].columns)));
   }
 
   protected async loadRows(options: LoadOptions): Promise<LoadResult<T>> {
@@ -275,6 +501,16 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     const rows = (o.rows ?? []).slice(0, r.depth).map((level, i): GroupedLevel<T> => ({ level, alias: `_r${i}` }));
     const columns = (o.columns ?? []).slice(0, c.depth).map((level, j): GroupedLevel<T> => ({ level, alias: `_c${j}` }));
     const grouped = [...rows, ...columns];
+    const steps = this.partSteps(o, grouped);
+    const under = [this.parentsText(rows, r.parents), this.parentsText(columns, c.parents)].filter((text) => text !== '');
+    if (under.length) steps.push(`filter(${under.length === 1 ? under[0] : under.map((text) => `(${text})`).join(' and ')})`);
+    const aggregate = `aggregate(${valuesText(o.measures ?? [])})`;
+    steps.push(grouped.length ? `groupby((${grouped.map((g) => groupedText(g)).join(',')}),${aggregate})` : aggregate);
+    return steps.join('/');
+  }
+
+  // The rows a pivot reads, before it groups them: its filter, the members it keeps, the values of the levels it computes.
+  private partSteps(o: { filter?: FilterExpression | null; keep?: readonly PivotKeep<T>[] }, grouped: readonly GroupedLevel<T>[]): string[] {
     const steps: string[] = [];
     const filter = this.filterText({ filter: o.filter });
     if (filter !== 'true') steps.push(`filter(${filter})`);
@@ -282,15 +518,37 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     if (kept.length) steps.push(`filter(${kept.length === 1 ? kept[0] : kept.map((text) => `(${text})`).join(' and ')})`);
     const computed = grouped.filter((g) => g.level.interval !== undefined);
     if (computed.length) steps.push(`compute(${computed.map((g) => `${intervalText(g.level)} as ${g.alias}`).join(',')})`);
-    const under = [this.parentsText(rows, r.parents), this.parentsText(columns, c.parents)].filter((text) => text !== '');
-    if (under.length) steps.push(`filter(${under.length === 1 ? under[0] : under.map((text) => `(${text})`).join(' and ')})`);
-    const values = ['$count as _n'];
-    (o.measures ?? []).forEach((m, k) => {
-      if (m.type !== 'count' && m.type !== 'custom') values.push(`${odataPath(m.field!)} with ${AGGREGATE[m.type]} as _m${k}`);
-    });
-    const aggregate = `aggregate(${values.join(',')})`;
-    steps.push(grouped.length ? `groupby((${grouped.map((g) => groupedText(g)).join(',')}),${aggregate})` : aggregate);
-    return steps.join('/');
+    return steps;
+  }
+
+  // `Region eq 'East' and City eq 'Ankara'`: the rows of one member, its keys on the levels grouped from the top.
+  private pathText(grouped: readonly GroupedLevel<T>[], path: readonly unknown[]): string {
+    return path.map((key, k) => `${groupedText(grouped[k])} eq ${odataLiteral(key, keyType(grouped[k].level, key, this.fields))}`).join(' and ');
+  }
+
+  // The rows of some members, `(…) or (…)`, in parts short enough for a request's address.
+  private pathChunks(grouped: readonly GroupedLevel<T>[], paths: readonly (readonly unknown[])[]): string[] {
+    const out: string[] = [];
+    let part: string[] = [];
+    let size = 0;
+    for (const path of paths) {
+      const text = this.pathText(grouped, path);
+      if (part.length && size + text.length > PATHS_TEXT) {
+        out.push(part.length === 1 ? part[0] : part.map((one) => `(${one})`).join(' or '));
+        part = [];
+        size = 0;
+      }
+      part.push(text);
+      size += text.length + 8;
+    }
+    if (part.length) out.push(part.length === 1 ? part[0] : part.map((one) => `(${one})`).join(' or '));
+    return out;
+  }
+
+  // Reads with `$apply` and the query options given; in one `$batch` with `aggregation.batch`. The answers in their order.
+  private readApplied(queries: readonly Record<string, string>[], options: OperationOptions): Promise<unknown[]> {
+    const read = async (query: Record<string, string>) => (await this.send({ operation: 'load', method: 'GET', url: this.url, query: { ...query, ...requestParams(options) }, signal: options.signal })).body;
+    return this.aggregationOptions.batch && queries.length > 1 ? this.sendReads(queries, options) : Promise.all(queries.map(read));
   }
 
   // `(year(OrderDate) eq 2024 and (month(OrderDate) add 2) div 3 eq 2) or (…)`, or `not (…)`: the rows `keep` keeps. Without
@@ -324,26 +582,24 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
   // `(_r0 eq 2024 and ShipCountry eq 'France') or (…)`: the rows under the members whose children a depth holds.
   private parentsText(grouped: readonly GroupedLevel<T>[], parents: PivotDepth['parents']): string {
     if (!parents) return '';
-    const one = (path: readonly unknown[]) => path.map((key, k) => `${groupedText(grouped[k])} eq ${odataLiteral(key, keyType(grouped[k].level, key, this.fields))}`).join(' and ');
-    return parents.length === 1 ? one(parents[0]) : parents.map((path) => `(${one(path)})`).join(' or ');
+    return parents.length === 1 ? this.pathText(grouped, parents[0]) : parents.map((path) => `(${this.pathText(grouped, path)})`).join(' or ');
   }
 
-  private pivotGroup(record: Record<string, unknown>, o: PivotLoadOptions<T>, rows: number, columns: number): PivotGroup {
-    const key = (g: GroupedLevel<T>) => (g.level.interval === undefined ? getField(record, g.level.field) : record[g.alias]);
+  private pivotGroup(record: Record<string, unknown>, o: Pick<PivotLoadOptions<T>, 'rows' | 'columns' | 'measures'>, rows: number, columns: number): PivotGroup {
     return {
-      rows: (o.rows ?? []).slice(0, rows).map((level, i) => key({ level, alias: `_r${i}` })),
-      columns: (o.columns ?? []).slice(0, columns).map((level, j) => key({ level, alias: `_c${j}` })),
+      rows: (o.rows ?? []).slice(0, rows).map((level, i) => recordKey(record, { level, alias: `_r${i}` })),
+      columns: (o.columns ?? []).slice(0, columns).map((level, j) => recordKey(record, { level, alias: `_c${j}` })),
       count: Number(record._n ?? 0),
-      values: (o.measures ?? []).map((m, k) => (m.type === 'count' ? record._n : (record[`_m${k}`] ?? null))),
+      values: recordValues(record, o.measures ?? []),
     };
   }
 
   // Reads in one `$batch`, answers in their order; one that failed fails them all.
-  private async sendReads(applies: readonly string[], options: PivotLoadOptions<T>): Promise<unknown[]> {
+  private async sendReads(queries: readonly Record<string, string>[], options: OperationOptions): Promise<unknown[]> {
     const url = (typeof this.odata.batch === 'object' ? this.odata.batch.url : undefined) ?? `${this.serviceRoot}$batch`;
     const boundary = `batch_${randomText()}`;
-    const requests = applies.map((apply): BatchRequestPart => {
-      const query = new URLSearchParams({ $apply: apply });
+    const requests = queries.map((given): BatchRequestPart => {
+      const query = new URLSearchParams(given);
       for (const [name, value] of Object.entries(requestParams(options) ?? {})) if (value !== undefined && value !== null) query.set(name, String(value));
       return { method: 'GET', url: absoluteUrl(`${this.url}?${queryString(query)}`), headers: { Accept: 'application/json' } };
     });
@@ -362,7 +618,7 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
       throw DataError.create('MJD104', { operation: 'load', details: response.body, cause: error }, (error as Error).message);
     }
     const byId = new Map(answers.filter((a) => a.contentId).map((a) => [a.contentId, a]));
-    return applies.map((_, i) => {
+    return queries.map((_, i) => {
       const answer = byId.get(String(i + 1)) ?? answers[i];
       if (!answer) throw DataError.create('MJD104', { operation: 'load', details: response.body }, `no answer to read ${i + 1} of the batch`);
       if (answer.status < 200 || answer.status >= 300) {
@@ -433,6 +689,67 @@ function randomText(): string {
 // A level with an interval is grouped by the name `compute` gave its value.
 function groupedText(g: GroupedLevel<any>): string {
   return g.level.interval === undefined ? odataPath(g.level.field) : g.alias;
+}
+
+// `$count as _n,Freight with sum as _m0`: the rows and the measures of a group.
+function valuesText(measures: readonly PivotMeasure<any>[]): string {
+  const values = ['$count as _n'];
+  measures.forEach((m, k) => {
+    if (m.type !== 'count' && m.type !== 'custom') values.push(`${odataPath(m.field!)} with ${AGGREGATE[m.type]} as _m${k}`);
+  });
+  return values.join(',');
+}
+
+// A level's key in an answer: under the field's path, or under its alias when the level computes it.
+function recordKey(record: Record<string, unknown>, g: GroupedLevel<any>): unknown {
+  return g.level.interval === undefined ? getField(record, g.level.field) : record[g.alias];
+}
+
+function recordValues(record: Record<string, unknown>, measures: readonly PivotMeasure<any>[]): unknown[] {
+  return measures.map((m, k) => (m.type === 'count' ? record._n : (record[`_m${k}`] ?? null)));
+}
+
+function recordsOf(body: unknown): Record<string, unknown>[] {
+  const value = (body as { value?: unknown } | null)?.value;
+  if (!Array.isArray(value)) throw DataError.create('MJD104', { operation: 'load', details: body }, 'no "value" array');
+  return value;
+}
+
+function countOf(body: unknown): number {
+  const count = Number((body as Record<string, unknown> | null)?.['@odata.count']);
+  if (!Number.isFinite(count)) throw DataError.create('MJD104', { operation: 'load', details: body }, 'no "@odata.count"');
+  return count;
+}
+
+// A key as one answer writes it, to find the same member in another answer.
+function keyText(key: unknown): string {
+  return JSON.stringify(key ?? null);
+}
+
+// `$skip` and `$top` of the members from `from` up to `to`.
+function pageOf(from: number, to: number): Record<string, string> {
+  return { ...(from > 0 ? { $skip: String(from) } : {}), ...(to !== Infinity ? { $top: String(to - from) } : {}) };
+}
+
+// A value a measure orders by, as memory ranks it: numbers and dates; anything else has none.
+function rankOf(value: unknown): number | null {
+  return typeof value === 'number' ? value : value instanceof Date ? value.getTime() : null;
+}
+
+// Whether a member of value `m` comes before the empty member of value `v`: by value, and before it on a tie.
+function summaryBefore(m: number | null, v: number | null, dir: 'asc' | 'desc'): boolean {
+  if (m === null || v === null) return false;
+  return m === v || (dir === 'desc' ? m > v : m < v);
+}
+
+function byLength(paths: readonly (readonly unknown[])[]): Map<number, (readonly unknown[])[]> {
+  const out = new Map<number, (readonly unknown[])[]>();
+  for (const path of paths) {
+    const list = out.get(path.length);
+    if (list) list.push(path);
+    else out.set(path.length, [path]);
+  }
+  return out;
 }
 
 // Quarters with integer division; a range starts at `floor(value / width) * width`, the division taken in decimals.

@@ -7,10 +7,18 @@ import type { FieldType } from '../query/field-type';
 import { queryArray } from '../query/local-query';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
-import { isPivotInterval, pivotResult, queryPivot, readPivotGroup } from '../query/pivot';
+import type { FilterExpression } from '../query/filter-expression';
+import { pivotResult, queryPivot, readPivotGroup } from '../query/pivot';
+import type { PivotCellsOptions } from '../query/pivot-cells-options';
+import type { PivotCellsResult } from '../query/pivot-cells-result';
+import type { PivotCountsOptions } from '../query/pivot-counts-options';
+import type { PivotCountsResult } from '../query/pivot-counts-result';
 import type { PivotGroup } from '../query/pivot-group';
 import type { PivotLoadOptions } from '../query/pivot-load-options';
 import type { PivotLoadResult } from '../query/pivot-load-result';
+import type { PivotMembersOptions } from '../query/pivot-members-options';
+import type { PivotMembersResult } from '../query/pivot-members-result';
+import { pivotCells, pivotCellsResult, pivotCounts, pivotMembers, readPivotCounts, readPivotMembers } from '../query/pivot-window';
 import type { RowGroup } from '../query/row-group';
 import type { AdapterEvents } from './adapter-events';
 import type { BatchResult } from './batch-result';
@@ -20,12 +28,11 @@ import type { Change } from './change';
 import type { DataAdapterOptions } from './data-adapter-options';
 import { splitLoad } from './load-split';
 import type { OperationOptions } from './operation-options';
+import { checkCellsOptions, checkCountsOptions, checkMembersOptions, checkPivotOptions, SUMMARY_TYPES } from './pivot-checks';
 import type { PushedChange } from './pushed-change';
 import { RowKeys } from './row-keys';
 import type { SaveOutcome } from './save-outcome';
 import type { WriteOptions } from './write-options';
-
-const SUMMARY_TYPES = new Set(['count', 'countDistinct', 'sum', 'min', 'max', 'avg']);
 
 /**
  * Base class of all adapters. A subclass talks to its backend (`loadRows`, `insertRow`, `updateRow`,
@@ -121,7 +128,7 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
   async loadPivot(options: PivotLoadOptions<T> = {}): Promise<PivotLoadResult> {
     let checked: PivotLoadOptions<T>;
     try {
-      checked = this.checkPivotOptions(options);
+      checked = checkPivotOptions(options, (detail) => DataError.create('MJD302', { operation: 'load' }, detail));
       this.throwIfAborted(checked.signal, 'load');
     } catch (error) {
       throw this.reportFailure(error, 'load');
@@ -151,6 +158,58 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
     } catch (error) {
       throw this.reportFailure(error, 'load');
     }
+  }
+
+  /** Whether the backend computes this pivot (`capabilities.pivot`, and nothing that needs memory); otherwise its rows are loaded and grouped here. */
+  computesPivot(options: PivotLoadOptions<T>): boolean {
+    return !!this.capabilities.pivot && this.pivotRemotely(options);
+  }
+
+  /**
+   * Members of one level of a pivot axis, a part of each slice's parent's children (see `PivotMembersOptions`), for a
+   * view that loads as it scrolls. A backend with `capabilities.pivotWindow` computes them, unless they need memory;
+   * otherwise the rows are loaded and grouped here.
+   */
+  loadPivotMembers(options: PivotMembersOptions<T>): Promise<PivotMembersResult> {
+    return this.pivotPart(
+      options,
+      checkMembersOptions,
+      (o) => ({ rows: o.levels, columns: o.sortBySummary?.levels, measures: o.measures, keep: o.keep }),
+      pivotMembers,
+      (o) => this.loadPivotMemberSlices(o),
+      (body, o) => readPivotMembers(body, o, this.fields),
+    );
+  }
+
+  /** The number of children of members of a pivot axis (see `PivotCountsOptions`); computed as `loadPivotMembers` is. */
+  loadPivotCounts(options: PivotCountsOptions<T>): Promise<PivotCountsResult> {
+    return this.pivotPart(
+      options,
+      checkCountsOptions,
+      (o) => ({ rows: o.levels, keep: o.keep }),
+      pivotCounts,
+      (o) => this.loadPivotChildCounts(o),
+      (body, o, ctx) => readPivotCounts(body, o, this.fields, ctx),
+    );
+  }
+
+  /** The measures where some row members and some column members cross (see `PivotCellsOptions`); computed as `loadPivotMembers` is. */
+  loadPivotCells(options: PivotCellsOptions<T>): Promise<PivotCellsResult> {
+    return this.pivotPart(
+      options,
+      checkCellsOptions,
+      (o) => ({ rows: o.rows, columns: o.columns, measures: o.measures, keep: o.keep }),
+      pivotCells,
+      (o) => this.loadPivotCellGroups(o),
+      (body, o, ctx) => {
+        if (!Array.isArray(body)) throw new TypeError('no pivot groups');
+        return pivotCellsResult(
+          body.map((group) => readPivotGroup(group, o, this.fields)),
+          o,
+          ctx,
+        );
+      },
+    );
   }
 
   async count(options: Pick<LoadOptions, 'filter' | 'params' | 'signal'> = {}): Promise<number> {
@@ -335,6 +394,21 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
     return Promise.reject(DataError.create('MJD301', { operation: 'load' }, 'compute pivots'));
   }
 
+  /** For a backend with `capabilities.pivotWindow`: the members of the options, `{ slices: [{ total, members: [{ key, count, values, childCount }] }] }`. */
+  protected loadPivotMemberSlices(_options: PivotMembersOptions<T>): Promise<unknown> {
+    return Promise.reject(DataError.create('MJD301', { operation: 'load' }, 'compute pivot members'));
+  }
+
+  /** For a backend with `capabilities.pivotWindow`: the numbers of the options, `{ counts: [{ path, count }] }`. */
+  protected loadPivotChildCounts(_options: PivotCountsOptions<T>): Promise<unknown> {
+    return Promise.reject(DataError.create('MJD301', { operation: 'load' }, 'count pivot members'));
+  }
+
+  /** For a backend with `capabilities.pivotWindow`: the groups of the crossings asked for (see `PivotGroup`). */
+  protected loadPivotCellGroups(_options: PivotCellsOptions<T>): Promise<unknown> {
+    return Promise.reject(DataError.create('MJD301', { operation: 'load' }, 'compute pivot cells'));
+  }
+
   /** Whether the backend can compute this pivot; computed values and custom measures need memory. */
   protected pivotRemotely(options: PivotLoadOptions<T>): boolean {
     const levels = [...(options.rows ?? []), ...(options.columns ?? [])];
@@ -419,65 +493,47 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
     return out;
   }
 
-  private checkPivotOptions(o: PivotLoadOptions<T>): PivotLoadOptions<T> {
-    const invalid = (detail: string) => DataError.create('MJD302', { operation: 'load' }, detail);
-    const out: PivotLoadOptions<T> = { ...o };
-    if (o.filter) {
+  /**
+   * A part of a pivot: the options checked, then the backend asked (`capabilities.pivotWindow`, and nothing that needs
+   * memory) and its answer read, or the rows that `filter` passes loaded with `load` and grouped here.
+   */
+  private async pivotPart<O extends { filter?: FilterExpression | null; expand?: readonly string[]; params?: Readonly<Record<string, unknown>>; signal?: AbortSignal }, R>(
+    options: O,
+    check: (o: O, invalid: (detail: string) => Error) => O,
+    asked: (o: O) => PivotLoadOptions<T>,
+    memory: (rows: readonly T[], o: O, ctx: EvaluateContext) => R,
+    remote: (o: O) => Promise<unknown>,
+    read: (body: unknown, o: O, ctx: EvaluateContext) => R,
+  ): Promise<R> {
+    let checked: O;
+    try {
+      checked = check(options, (detail) => DataError.create('MJD302', { operation: 'load' }, detail));
+      this.throwIfAborted(checked.signal, 'load');
+    } catch (error) {
+      throw this.reportFailure(error, 'load');
+    }
+    const ctx = this.evaluateContext;
+    if (!this.capabilities.pivotWindow || !this.pivotRemotely(asked(checked))) {
+      const { filter, expand, params, signal } = checked;
+      // `load` reports its own failure.
+      const { rows } = await this.load({ filter, expand, params, signal });
       try {
-        validateFilter(o.filter);
-      } catch (e) {
-        throw invalid((e as Error).message);
+        return memory(rows, { ...checked, filter: null }, ctx);
+      } catch (error) {
+        throw this.reportFailure(error, 'load');
       }
-    } else {
-      delete out.filter;
     }
-    for (const name of ['rows', 'columns'] as const) {
-      const levels = o[name];
-      if (!levels) continue;
-      const level = (l: (typeof levels)[number]) =>
-        !!l && typeof l.field === 'string' && isPivotInterval(l.interval) && (l.dir === undefined || l.dir === 'asc' || l.dir === 'desc') && (l.value === undefined || typeof l.value === 'function');
-      if (!Array.isArray(levels) || !levels.every(level)) throw invalid(`${name} items are { field, interval?, dir?: "asc" | "desc", value? }`);
-      out[name] = levels.map((l) => ({ ...l }));
-    }
-    if (o.keep) {
-      const keep = (k: (typeof o.keep)[number]) =>
-        !!k &&
-        typeof k.field === 'string' &&
-        (k.intervals === undefined || (Array.isArray(k.intervals) && k.intervals.every((i) => i !== undefined && isPivotInterval(i)))) &&
-        (k.value === undefined || typeof k.value === 'function') &&
-        Array.isArray(k.paths) &&
-        k.paths.every(Array.isArray) &&
-        (k.type === undefined || k.type === 'include' || k.type === 'exclude');
-      if (!Array.isArray(o.keep) || !o.keep.every(keep)) throw invalid('keep items are { field, intervals?, value?, paths: arrays of keys, type?: "include" | "exclude", filter? }');
-      o.keep.forEach((k, i) => {
-        if (k.filter === undefined) return;
-        try {
-          validateFilter(k.filter, `keep[${i}].filter`);
-        } catch (e) {
-          throw invalid((e as Error).message);
-        }
-      });
-      out.keep = o.keep.map((k) => ({ ...k, paths: k.paths.map((path: readonly unknown[]) => [...path]) }));
-    }
-    if (o.measures) {
-      const measure = (m: (typeof o.measures)[number]) => {
-        if (!m) return false;
-        if (m.type === 'custom') return typeof m.start === 'function' && typeof m.add === 'function' && typeof m.result === 'function';
-        return SUMMARY_TYPES.has(m.type) && (m.type === 'count' || typeof m.field === 'string' || typeof m.value === 'function');
-      };
-      if (!Array.isArray(o.measures) || !o.measures.every(measure)) {
-        throw invalid('measures are { type, field } of a summary type (count needs no field), or { type: "custom", start, add, result }');
+    try {
+      const body = await remote(checked);
+      this.throwIfAborted(checked.signal, 'load');
+      try {
+        return read(body, checked, ctx);
+      } catch (error) {
+        throw DataError.create('MJD104', { operation: 'load', details: body, cause: error }, (error as Error).message);
       }
-      out.measures = o.measures.map((m) => ({ ...m }));
+    } catch (error) {
+      throw this.reportFailure(error, 'load');
     }
-    for (const name of ['expandedRows', 'expandedColumns'] as const) {
-      const paths = o[name];
-      if (paths === undefined || paths === true) continue;
-      if (!Array.isArray(paths) || !paths.every(Array.isArray)) throw invalid(`${name} is true or a list of paths (arrays of keys)`);
-      out[name] = paths.map((path) => [...path]);
-    }
-    if (o.expand) out.expand = [...o.expand];
-    return out;
   }
 
   private runBeforeEvent(change: Change<T, K>): Change<T, K> {
