@@ -270,6 +270,57 @@ describe('DataSource', () => {
     expect(source.rowAt(1)?.name).toBe('İzmir');
   });
 
+  it('takes new rows from setData: every source over the adapter loads them again from the first page', async () => {
+    const adapter = cityAdapter();
+    const all = new DataSource<City, number>({ adapter, loadMode: 'all', filter: where('country', '=', 'TR') });
+    const paged = new DataSource<City, number>({ adapter, loadMode: 'page', pageSize: 2 });
+    await Promise.all([all.load(), paged.load()]);
+    await paged.setPage(2);
+    expect(await all.byKey(3)).toMatchObject({ name: 'Berlin' });
+    const reasons = changesOf(all);
+    const told: string[] = [];
+    adapter.onChanged((e) => told.push(`${e.source} ${e.changes.length}`));
+    await all.setData([
+      { id: 10, name: 'Bursa', country: 'TR', people: 3 },
+      { id: 11, name: 'Rome', country: 'IT', people: 3 },
+      { id: 12, name: 'Konya', country: 'TR', people: 2 },
+    ]);
+    expect(all.rows.map((c) => c.name)).toEqual(['Bursa', 'Konya']);
+    expect(told).toEqual(['replace 0']);
+    expect(reasons.slice(0, 1)).toEqual(['reload']);
+    // A row found by key before is gone with the rows it came from.
+    expect(all.rowByKey(3)).toBeUndefined();
+    await vi.waitFor(() => expect(paged.loadedPageIndex).toBe(0));
+    expect([paged.rows.map((c) => c.name), paged.total]).toEqual([['Bursa', 'Rome'], 3]);
+    // Through the adapter, a function read on every operation.
+    let rows = cities().slice(0, 2);
+    adapter.data = () => rows;
+    await vi.waitFor(() => expect(all.rows.map((c) => c.name)).toEqual(['İstanbul', 'Ankara']));
+    rows = cities().slice(3);
+    await all.reload();
+    expect(all.rows.map((c) => c.name)).toEqual(['Izmir']);
+    expect(typeof adapter.data).toBe('function');
+  });
+
+  it('loads new rows from setData in blocks, and before a load leaves them for it', async () => {
+    const adapter = new ArrayAdapter<City, number>({ data: cities(), key: 'id' });
+    const blocks = new DataSource<City, number>({ adapter, loadMode: 'blocks', pageSize: 2 });
+    await blocks.load();
+    await blocks.setData(Array.from({ length: 7 }, (_, i) => ({ id: i, name: `n${i}`, country: 'TR', people: i })));
+    expect([blocks.total, blocks.rowAt(0)?.name, blocks.rowAt(1)?.name]).toEqual([7, 'n0', 'n1']);
+    const idle = new DataSource<City, number>({ adapter, loadMode: 'all' });
+    await idle.setData(cities().slice(0, 1));
+    expect(idle.status).toBe('idle');
+    await idle.load();
+    expect(idle.rows.map((c) => c.name)).toEqual(['İstanbul']);
+  });
+
+  it('refuses setData over an adapter whose rows are its backend’s, and data that is no array', () => {
+    const source = new DataSource<City, number>({ adapter: new TestAdapter(3) });
+    expect(() => source.setData(cities())).toThrow(expect.objectContaining({ code: 'MJD302' }));
+    expect(() => cityAdapter().setData({} as never)).toThrow(expect.objectContaining({ code: 'MJD302' }));
+  });
+
   it('loads blocks where the view is, counting once', async () => {
     const adapter = new TestAdapter(1000);
     const source = new DataSource<City, number>({ adapter, loadMode: 'blocks', pageSize: 50 });

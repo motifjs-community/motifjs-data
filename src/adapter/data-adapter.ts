@@ -381,6 +381,11 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
     this.changedEmitter.fire({ changes: [...changes], source: 'push' });
   }
 
+  /** Tells every source over the adapter that its rows were all replaced (`onChanged`, `source: 'replace'`): they load them again. */
+  protected rowsReplaced() {
+    this.changedEmitter.fire({ changes: [], source: 'replace' });
+  }
+
   /** Gets only what the backend can do; the rest of the options are applied afterwards in memory. */
   protected abstract loadRows(options: LoadOptions): Promise<LoadResult<T>>;
 

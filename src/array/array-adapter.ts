@@ -9,17 +9,36 @@ import type { ArrayAdapterOptions } from './array-adapter-options';
 
 /** Rows in an array. Loads return the row objects themselves; writes change the array in place, and an insert stores the given object. */
 export class ArrayAdapter<T extends object = Record<string, unknown>, K = unknown> extends DataAdapter<T, K> {
-  private readonly data: T[] | (() => T[]);
+  private given: T[] | (() => T[]);
   private readonly createKey?: (values: Partial<T>, rows: readonly T[]) => unknown;
 
   constructor(options: ArrayAdapterOptions<T>) {
     super(options);
-    this.data = options.data;
+    this.given = options.data;
     this.createKey = options.createKey;
   }
 
+  /** The rows now: the array, or what the function gives. */
   get rows(): T[] {
-    return typeof this.data === 'function' ? this.data() : this.data;
+    return typeof this.given === 'function' ? this.given() : this.given;
+  }
+
+  /** The rows as given: an array, or a function read on every operation. Assigned, they are replaced as with `setData`. */
+  get data(): T[] | (() => T[]) {
+    return this.given;
+  }
+  set data(value: T[] | (() => T[])) {
+    this.setData(value);
+  }
+
+  /**
+   * Replaces the rows: an array, or a function read on every operation. Every source over the adapter loads them again
+   * from the start (`onChanged` tells it, with `source: 'replace'`).
+   */
+  setData(data: T[] | (() => T[])) {
+    if (!Array.isArray(data) && typeof data !== 'function') throw DataError.create('MJD302', { operation: 'load' }, 'the data of an ArrayAdapter is an array or a function');
+    this.given = data;
+    this.rowsReplaced();
   }
 
   protected backendCapabilities(): Capabilities {

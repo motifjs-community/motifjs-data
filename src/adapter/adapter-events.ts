@@ -14,6 +14,7 @@ export interface AdapterEvents<T, K> {
   updated: { key: K; changes: Partial<T>; row: Partial<T> };
   removing: EventArgs & { key: K };
   removed: { key: K };
-  changed: { changes: PushedChange<T, K>[]; source: 'write' | 'push' };
+  /** Rows changed: written through the adapter, pushed (`push`), or all of them replaced (`replace`, `changes` empty). */
+  changed: { changes: PushedChange<T, K>[]; source: 'write' | 'push' | 'replace' };
   error: { error: DataError };
 }

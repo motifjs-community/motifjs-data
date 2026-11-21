@@ -58,6 +58,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   filter: OData has no function for the day of the week.
 - `DataSource.narrow(filter, options)`: a new data source over the same adapter, for the rows of the current query
   (filter and search, params, select, expand) that the filter keeps too.
+- Rows given anew: `ArrayAdapter.setData(rows)` and its `data`, read and written, replace its array (or the function
+  read on every operation), and `onChanged` tells it with `source: 'replace'`. Every `DataSource` over the adapter
+  forgets the rows found by key and loads again from the first page; `DataSource.setData(rows)` does it through its
+  own adapter and resolves once the rows are loaded, and throws `MJD302` over an adapter whose rows are its backend's.
 - Grouping in memory reads a date's part and a text's comparable form once per value, not once per row, finds a
   row's member by the row's value before working out how it compares, and orders members by forms worked out once;
   numbers of children are counted without grouping the children. A level of values all different keeps up to 262,144

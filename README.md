@@ -64,7 +64,9 @@ await orders.remove(saved.id);
 It keeps your objects as they are: `insert(row)` puts that very object into the array and resolves to
 it (`===`), and a key from `createKey` is written onto it. Loads, `byKey`, `update`, `push` and the
 events hand back the same objects. Your rows may be plain or reactive; the adapter stores them as it
-gets them.
+gets them. `adapter.rows` is the array now; `setData(rows)` (or `adapter.data = rows`) replaces it, an
+array or a function read on every operation, and every `DataSource` over the adapter loads the new rows
+from the start (`onChanged` tells it with `source: 'replace'`).
 
 ## Concepts
 
@@ -276,6 +278,12 @@ reject; a failure sets `status` to `'error'` and `error`, and `retry()` loads ag
 `loadRange({ skip, take, filter, count, signal })` reads a part of the current query (filter, search,
 sort, `params`; `filter` narrows it) without touching the rows the source holds, for an export or a
 print that goes through every page. It rejects when the load fails.
+
+The rows a source holds are read at once with `rows`, `rowAt(i)`, `forEachLoaded` and `rowByKey`; every
+row of its query, whatever it holds, with `await loadRange()`. Over an `ArrayAdapter`, `setData(rows)`
+gives it other rows: the adapter's array is replaced, the rows found by key go, and every source over
+that adapter loads again from the first page; it resolves once this one has. Any other adapter's rows
+are its backend's, and `setData` throws `MJD302`.
 
 ## ChangeTracker
 

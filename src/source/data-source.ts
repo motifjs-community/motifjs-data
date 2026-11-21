@@ -1,5 +1,6 @@
 import { Disposable, DisposableStore, Emitter, type Event as MotifEvent } from '@motifx/core';
 import type { DataAdapter } from '../adapter/data-adapter';
+import { ArrayAdapter } from '../array/array-adapter';
 import { splitLoad } from '../adapter/load-split';
 import type { PushedChange } from '../adapter/pushed-change';
 import { DataError, isAbortError } from '../errors/data-error';
@@ -77,6 +78,8 @@ export class DataSource<T = Record<string, unknown>, K = unknown> extends Dispos
   private readonly found = new Map<string, T>();
   private keyIndex: Map<string, { row: T; index: number }> | null = null;
   private reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The load the adapter's rows replaced started. */
+  private replacing: Promise<void> | null = null;
 
   readonly onChanged: MotifEvent<DataSourceChange<T>> = this.changedEmitter.event;
 
@@ -105,7 +108,7 @@ export class DataSource<T = Record<string, unknown>, K = unknown> extends Dispos
             failed: (error, beforeTotal) => this.blockFailed(error, beforeTotal),
           })
         : null;
-    this.disposables.add(this.adapter.onChanged((e) => this.applyChanges(e.changes)));
+    this.disposables.add(this.adapter.onChanged((e) => (e.source === 'replace' ? this.replaced() : this.applyChanges(e.changes))));
   }
 
   get status(): DataSourceStatus {
@@ -329,6 +332,17 @@ export class DataSource<T = Record<string, unknown>, K = unknown> extends Dispos
     return this.load();
   }
 
+  /**
+   * Replaces the rows of an `ArrayAdapter` (an array, or a function read on every operation) and loads them again from
+   * the start, as every other source over that adapter does; resolves once they are loaded. The rows of any other
+   * adapter are its backend's: it throws (`MJD302`).
+   */
+  setData(data: T[] | (() => T[])): Promise<void> {
+    if (!(this.adapter instanceof ArrayAdapter)) throw DataError.create('MJD302', { operation: 'load' }, "setData needs an ArrayAdapter: the rows of any other adapter are its backend's");
+    (this.adapter as unknown as ArrayAdapter<T & object, K>).setData(data as (T & object)[] | (() => (T & object)[]));
+    return this.replacing ?? Promise.resolve();
+  }
+
   /** Loads what failed again. */
   retry(): Promise<void> {
     if (!this.blocks || this.currentStatus === 'error') return this.reload();
@@ -544,6 +558,21 @@ export class DataSource<T = Record<string, unknown>, K = unknown> extends Dispos
   }
 
   // Changes the adapter saved or was told about (`push`), applied to the loaded rows.
+  /** The adapter's rows were all replaced: the rows found by key go, and the rows load again from the first page. */
+  private replaced() {
+    this.page = 0;
+    if (this.currentStatus === 'idle') {
+      this.found.clear();
+      this.keyIndex = null;
+      return;
+    }
+    const load = this.reload();
+    this.replacing = load;
+    void load.finally(() => {
+      if (this.replacing === load) this.replacing = null;
+    });
+  }
+
   private applyChanges(changes: readonly PushedChange<T, K>[]) {
     if (this.currentStatus === 'idle') return;
     // Without keys the rows cannot be matched.
