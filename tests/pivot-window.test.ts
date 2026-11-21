@@ -98,6 +98,12 @@ describe('pivot windows in memory', () => {
       ['South', 30],
     ]);
     expect(pivotCounts(sales, { filter, keep, levels: [region, city], paths: [[]] }, ctx).childCount([])).toBe(2);
+    // South has Milan and Rome, Milan only in 2023.
+    const counted = pivotMembers(sales, { filter, keep, levels: [region, city], slices: [{ parent: [] }], childCounts: true }, ctx);
+    expect(counted.slices[0].members.map((m) => [m.key, m.childCount])).toEqual([
+      ['north', 1],
+      ['South', 1],
+    ]);
     expect(pivotCells(sales, { filter, keep, rows: [region], columns: [], measures: [count], rowPaths: [[]], columnPaths: [[]] }, ctx).count([], [])).toBe(3);
   });
 });

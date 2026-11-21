@@ -24,6 +24,9 @@ export interface PivotDepth {
 
 const DATE_PARTS: readonly unknown[] = ['year', 'quarter', 'month', 'day', 'dayOfWeek', 'date'];
 
+/** The values a level of an axis keeps worked out; past them (a level of values all different) each is worked out per row. */
+const KNOWN_VALUES = 262_144;
+
 /** Whether a value is a `PivotInterval` (or `undefined`, no interval). */
 export function isPivotInterval(value: unknown): value is PivotInterval | undefined {
   return value === undefined || DATE_PARTS.includes(value) || (typeof value === 'number' && Number.isFinite(value) && value > 0);
@@ -186,6 +189,8 @@ interface MemberNode {
   path: readonly unknown[];
   /** Its children by the comparable value of their keys. */
   children: Map<Comparable, MemberNode> | null;
+  /** Its children by the values of rows that fell in them, each no object: a value seen before finds its child at once. */
+  byValue: Map<unknown, MemberNode> | null;
   /** Its children are shown. */
   open: boolean;
   /** Its keys by their comparable values, to find it among the expanded members. */
@@ -199,11 +204,16 @@ export class PivotAxis<T> {
   private readonly comparers: (ValueComparer | undefined)[] = [];
   /** The comparable value of each key that is no object, by level: text is lowered once per value, not once per row. */
   private readonly comparables: Map<unknown, Comparable>[];
+  /** The key of each value that is no object, by level with an interval: a date's year is read once per value, not once per row. */
+  private readonly intervals: Map<unknown, unknown>[];
   /** The members shown below the top: the ids of the expanded ones, or `true` for all. */
   private readonly expanded: Set<string> | true;
   /** Memory: the root of the members found so far. */
-  private readonly root: MemberNode = { index: 0, path: [], children: null, open: true, id: '' };
+  private readonly root: MemberNode = { index: 0, path: [], children: null, byValue: null, open: true, id: '' };
+  private readonly found: MemberNode[] = [];
   private nodes = 1;
+  /** The values kept in the members' `byValue`, all of them. */
+  private byValues = 0;
 
   constructor(
     private readonly levels: readonly PivotLevel<T>[],
@@ -213,6 +223,7 @@ export class PivotAxis<T> {
     this.own = levels.map((level) => !!(level.value ?? ctx.groupValue?.(level.field)));
     this.readers = levels.map((level) => level.value ?? (ctx.groupValue?.(level.field) as ((row: T) => unknown) | undefined) ?? ((row: T) => getField(row, level.field)));
     this.comparables = levels.map(() => new Map());
+    this.intervals = levels.map(() => new Map());
     this.expanded = expanded === undefined || expanded === true ? true : new Set(expanded.map((path) => this.idOf(path)));
   }
 
@@ -225,17 +236,27 @@ export class PivotAxis<T> {
   holds(row: T, ids: ReadonlySet<string>): boolean {
     let id = '';
     for (let i = 0; i < this.levels.length; i++) {
-      id += `\u0001${partOf(this.knownComparable(i, intervalValue(this.readers[i](row), this.levels[i].interval)))}`;
+      id += `\u0001${partOf(this.knownComparable(i, this.keyOf(i, this.readers[i](row))))}`;
       if (ids.has(id)) return true;
     }
     return false;
+  }
+
+  /** The comparable value of a row's member on a level: what tells it apart from the others. */
+  comparableOf(row: T, level: number): Comparable {
+    return this.knownComparable(level, this.keyOf(level, this.readers[level](row)));
+  }
+
+  /** The comparable value of a key on a level. */
+  keyComparable(level: number, key: unknown): Comparable {
+    return this.comparable(level, key);
   }
 
   /** A row's members as ids, on every level from the top: the ids of the paths down to level 1, 2 … written into `out`. */
   ids(row: T, out: string[]): void {
     let id = '';
     for (let i = 0; i < this.levels.length; i++) {
-      id += `\u0001${partOf(this.knownComparable(i, intervalValue(this.readers[i](row), this.levels[i].interval)))}`;
+      id += `\u0001${partOf(this.knownComparable(i, this.keyOf(i, this.readers[i](row))))}`;
       out[i] = id;
     }
   }
@@ -246,19 +267,41 @@ export class PivotAxis<T> {
     out[0] = node;
     let n = 1;
     for (let i = 0; i < this.levels.length && node.open; i++) {
-      const value = intervalValue(this.readers[i](row), this.levels[i].interval);
-      const c = this.knownComparable(i, value);
-      let child = (node.children ??= new Map()).get(c);
+      const value = this.readers[i](row);
+      const plain = value !== null && typeof value !== 'object';
+      let child = plain ? node.byValue?.get(value) : undefined;
       if (!child) {
-        const id = `${node.id}\u0001${partOf(c)}`;
-        const open = i + 1 < this.levels.length && (this.expanded === true || this.expanded.has(id));
-        child = { index: this.nodes++, path: [...node.path, value], children: null, open, id };
-        node.children.set(c, child);
+        const key = this.keyOf(i, value);
+        const c = this.knownComparable(i, key);
+        child = (node.children ??= new Map()).get(c);
+        if (!child) {
+          const id = `${node.id}\u0001${partOf(c)}`;
+          const open = i + 1 < this.levels.length && (this.expanded === true || this.expanded.has(id));
+          child = { index: this.nodes++, path: [...node.path, key], children: null, byValue: null, open, id };
+          node.children.set(c, child);
+        }
+        if (plain && this.byValues < KNOWN_VALUES) {
+          (node.byValue ??= new Map()).set(value, child);
+          this.byValues++;
+        }
       }
       out[n++] = child;
       node = child;
     }
     return n;
+  }
+
+  /** Memory: takes the members a row is shown in into those found so far (see `childCount`). */
+  add(row: T) {
+    this.shown(row, this.found);
+  }
+
+  /** Memory: the number of children found for a member shown open, by its path; 0 for one not found. */
+  childCount(path: readonly unknown[]): number {
+    if (path.length >= this.levels.length) return 0;
+    let node: MemberNode | undefined = this.root;
+    for (let i = 0; i < path.length && node; i++) node = node.children?.get(this.knownComparable(i, path[i]));
+    return node?.children?.size ?? 0;
   }
 
   /** The members of the given paths and counts, by `pathId`; the root (`''`) always. */
@@ -287,8 +330,24 @@ export class PivotAxis<T> {
     if (key === null || typeof key === 'object') return this.comparable(level, key);
     const known = this.comparables[level];
     let c = known.get(key);
-    if (c === undefined) known.set(key, (c = this.comparable(level, key)));
+    if (c === undefined) {
+      c = this.comparable(level, key);
+      if (known.size < KNOWN_VALUES) known.set(key, c);
+    }
     return c;
+  }
+
+  /** The key of a row's value on a level: the value, or that of the level's interval. */
+  private keyOf(level: number, value: unknown): unknown {
+    const interval = this.levels[level].interval;
+    if (interval === undefined || value === null || typeof value === 'object') return intervalValue(value, interval);
+    const known = this.intervals[level];
+    let key = known.get(value);
+    if (key === undefined) {
+      key = intervalValue(value, interval);
+      if (known.size < KNOWN_VALUES) known.set(value, key);
+    }
+    return key;
   }
 
   /** The order of two keys of a level, as members are ordered: by the level's `dir`, the empty one last either way. */
@@ -301,8 +360,8 @@ export class PivotAxis<T> {
     const sign = dir === 'desc' ? -1 : 1;
     const own = interval === undefined ? this.ctx.groupCompare?.(field) : undefined;
     return (a, b) => {
-      const ka = this.comparable(level, a.key);
-      const kb = this.comparable(level, b.key);
+      const ka = this.knownComparable(level, a.key);
+      const kb = this.knownComparable(level, b.key);
       if (ka === null || kb === null) return ka === kb ? 0 : ka === null ? 1 : -1;
       return sign * (own ? own(a.key, b.key) : this.comparerOf(level, a.key).compare(ka, kb));
     };

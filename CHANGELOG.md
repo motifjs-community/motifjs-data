@@ -41,7 +41,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   value tells apart counted and then paged; a long list of members split into several reads; all in one `$batch` with
   `aggregation.batch`), and REST with `pivot` (a body with `kind`, `defaultPivotPartBody`, `window: false` for an
   endpoint of whole pivots only). Otherwise the rows are grouped in memory (`pivotMembers`, `pivotCounts`,
-  `pivotCells`), in the same order and with the same values as `queryPivot`.
+  `pivotCells`), in the same order and with the same values as `queryPivot`. Over a million rows in Node on a desktop
+  machine, the top members with the number of their children took about 0.7 s, a part of 100 of a member's 12,500
+  children about 0.25 s, and the values of 100 members by 2 about 0.1 s.
+- Grouping in memory reads a date's part and a text's comparable form once per value, not once per row, finds a
+  row's member by the row's value before working out how it compares, and orders members by forms worked out once;
+  numbers of children are counted without grouping the children. A level of values all different keeps up to 262,144
+  of them worked out.
 - The demo has a Pivot tab: 100,000 orders by city and customer down, quarter and month across, with
   four measures, members that open and close and a filter; and TripPin's people counted with `$apply`, in
   one `$batch` or not, checked against the memory engine. In Chrome on a desktop machine the first pivot

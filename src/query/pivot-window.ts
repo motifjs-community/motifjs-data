@@ -20,16 +20,19 @@ import { createRowFilter } from './row-filter';
  */
 export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions<T>, ctx: EvaluateContext = {}): PivotMembersResult {
   const depth = options.slices[0]?.parent.length ?? 0;
-  const levels = options.levels.slice(0, Math.min(depth + (options.childCounts ? 2 : 1), options.levels.length));
+  const levels = options.levels.slice(0, Math.min(depth + 1, options.levels.length));
   const upper = new PivotAxis<T>(options.levels.slice(0, depth), ctx);
   const find = options.find ?? [];
-  const parents = new Set([...options.slices.map((slice) => slice.parent), ...find.map((path) => path.slice(0, depth))].map((parent) => upper.idOf(parent)));
+  const parents = trieOf([...options.slices.map((slice) => slice.parent), ...find.map((path) => path.slice(0, depth))], upper);
   const sort = options.sortBySummary;
   const path = sort?.path ?? [];
   const columns = (sort?.levels ?? []).slice(0, path.length);
-  const under = depth ? rows.filter((row) => upper.holds(row, parents)) : rows;
+  const ids: string[] = [];
+  const under = depth ? rows.filter((row) => hits(row, upper, parents, ids) > 0) : rows;
   const query = { filter: options.filter, keep: options.keep, rows: levels, columns, measures: options.measures, expandedRows: true as const, expandedColumns: prefixes([path]) };
   const result = pivotResult(pivotGroups(under, query, ctx), query, ctx);
+  // The children of the members are counted, not grouped: only their number is asked for.
+  const below = options.childCounts && depth + 1 < options.levels.length ? found(under, options.levels.slice(0, depth + 2), true, options, ctx) : null;
   const axis = new PivotAxis<T>(levels, ctx);
   const total = result.columns;
   const at = memberAt(result.columns, path, new PivotAxis<T>(columns, ctx));
@@ -56,7 +59,7 @@ export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions
         total: children.length,
         members: part.map((m) => {
           const one: PivotSliceMember = { key: m.key, path: [...slice.parent, m.key], count: m.count, values: result.values(m, total) ?? measures.map(() => null) };
-          if (options.childCounts) one.childCount = m.children?.length ?? 0;
+          if (options.childCounts) one.childCount = below?.childCount(one.path) ?? 0;
           return one;
         }),
       };
@@ -75,43 +78,49 @@ export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions
 export function pivotCounts<T>(rows: readonly T[], options: PivotCountsOptions<T>, ctx: EvaluateContext = {}): PivotCountsResult {
   const deepest = options.paths.reduce((most, path) => Math.max(most, path.length), 0);
   const levels = options.levels.slice(0, Math.min(deepest + 1, options.levels.length));
-  const query = { filter: options.filter, keep: options.keep, rows: levels, columns: [], measures: [], expandedRows: prefixes(options.paths, true) };
-  const result = pivotResult(pivotGroups(rows, query, ctx), query, ctx);
-  const axis = new PivotAxis<T>(levels, ctx);
-  return { childCount: (path) => memberAt(result.rows, path, axis)?.children?.length ?? 0 };
+  const axis = found(rows, levels, prefixes(options.paths, true), options, ctx);
+  return { childCount: (path) => axis.childCount(path) };
+}
+
+/** An axis that found the members of the rows `filter` passes and `keep` keeps: its members shown open know their children. */
+function found<T>(rows: readonly T[], levels: readonly PivotLevel<T>[], expanded: true | readonly (readonly unknown[])[], options: Pick<PivotCountsOptions<T>, 'filter' | 'keep'>, ctx: EvaluateContext): PivotAxis<T> {
+  const pass = options.filter ? createRowFilter<T>(options.filter, ctx) : null;
+  const keepers = (options.keep ?? []).map((keep) => keeper(keep, ctx));
+  const axis = new PivotAxis<T>(levels, ctx, expanded);
+  for (const row of rows) {
+    if (pass && !pass(row)) continue;
+    if (keepers.length && !keepers.every((kept) => kept(row))) continue;
+    axis.add(row);
+  }
+  return axis;
 }
 
 /** The crossings `loadPivotCells` asks for, over rows in memory: one pass, each row counted in the crossings asked for that it falls in. */
 export function pivotCells<T>(rows: readonly T[], options: PivotCellsOptions<T>, ctx: EvaluateContext = {}): PivotCellsResult {
   const rowAxis = new PivotAxis<T>(options.rows, ctx);
   const columnAxis = new PivotAxis<T>(options.columns, ctx);
-  const rowWanted = byDepth(options.rowPaths, rowAxis);
-  const columnWanted = byDepth(options.columnPaths, columnAxis);
+  const rowTrie = trieOf(options.rowPaths, rowAxis);
+  const columnTrie = trieOf(options.columnPaths, columnAxis);
   const pass = options.filter ? createRowFilter<T>(options.filter, ctx) : null;
   const keepers = (options.keep ?? []).map((keep) => keeper(keep, ctx));
   const rules = options.measures.map((measure) => measureRule(measure, ctx));
   const cells = new Map<string, { count: number; sums: SummaryAccumulator[] }>();
-  const rowIds: string[] = [];
-  const columnIds: string[] = [];
+  const rowHits: string[] = [];
+  const columnHits: string[] = [];
   const values: unknown[] = new Array(rules.length);
   for (const row of rows) {
+    // The members asked for that the row falls in, found down the tree of their paths: a row under none leaves early.
+    const rowCount = hits(row, rowAxis, rowTrie, rowHits);
+    if (!rowCount) continue;
+    const columnCount = hits(row, columnAxis, columnTrie, columnHits);
+    if (!columnCount) continue;
     if (pass && !pass(row)) continue;
     if (keepers.length && !keepers.every((kept) => kept(row))) continue;
-    rowAxis.ids(row, rowIds);
-    columnAxis.ids(row, columnIds);
-    let read = false;
-    for (const [rowDepth, rowSet] of rowWanted) {
-      const rowId = rowDepth ? rowIds[rowDepth - 1] : '';
-      if (!rowSet.has(rowId)) continue;
-      for (const [columnDepth, columnSet] of columnWanted) {
-        const columnId = columnDepth ? columnIds[columnDepth - 1] : '';
-        if (!columnSet.has(columnId)) continue;
-        // Each measure reads the row once for all its crossings.
-        if (!read) {
-          for (let k = 0; k < rules.length; k++) values[k] = rules[k].value(row);
-          read = true;
-        }
-        const id = `${rowId}\u0002${columnId}`;
+    // Each measure reads the row once for all its crossings.
+    for (let k = 0; k < rules.length; k++) values[k] = rules[k].value(row);
+    for (let r = 0; r < rowCount; r++) {
+      for (let c = 0; c < columnCount; c++) {
+        const id = `${rowHits[r]}\u0002${columnHits[c]}`;
         let cell = cells.get(id);
         if (!cell) cells.set(id, (cell = { count: 0, sums: rules.map((rule) => rule.start()) }));
         cell.count++;
@@ -238,13 +247,35 @@ function prefixes(paths: readonly (readonly unknown[])[], self = false): (readon
   return out;
 }
 
-/** Paths by their depth, as ids; the total (`[]`) at depth 0. */
-function byDepth<T>(paths: readonly (readonly unknown[])[], axis: PivotAxis<T>): Map<number, Set<string>> {
-  const out = new Map<number, Set<string>>();
+/** The paths asked for as a tree of their keys' comparable values; a node a path ends on has the path's id. */
+interface Trie {
+  id: string | null;
+  children: Map<unknown, Trie> | null;
+}
+
+function trieOf<T>(paths: readonly (readonly unknown[])[], axis: PivotAxis<T>): Trie {
+  const root: Trie = { id: null, children: null };
   for (const path of paths) {
-    let set = out.get(path.length);
-    if (!set) out.set(path.length, (set = new Set()));
-    set.add(axis.idOf(path));
+    let node = root;
+    path.forEach((key, level) => {
+      const c = axis.keyComparable(level, key);
+      let next = (node.children ??= new Map()).get(c);
+      if (!next) node.children.set(c, (next = { id: null, children: null }));
+      node = next;
+    });
+    node.id = axis.idOf(path);
   }
-  return out;
+  return root;
+}
+
+/** The ids of the paths asked for that a row falls in, written into `out`; returns their number. */
+function hits<T>(row: T, axis: PivotAxis<T>, trie: Trie, out: string[]): number {
+  let n = 0;
+  let node: Trie | undefined = trie;
+  for (let level = 0; node; level++) {
+    if (node.id !== null) out[n++] = node.id;
+    if (!node.children) break;
+    node = node.children.get(axis.comparableOf(row, level));
+  }
+  return n;
 }

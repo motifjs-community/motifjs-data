@@ -369,7 +369,9 @@ for the levels' own order, its `path` names a member of the other axis by its `l
 `{ "counts": [{ "path": ["France"], "count": 11 }] }`, the number of each member's children on the next
 level, and `{ "kind": "cells", …, "rows", "columns", "measures", "rowPaths", "columnPaths" }` with the
 groups of every row path and column path asked, as for a whole pivot. `writePart` and `readPart` change
-them.
+them. A server that holds the rows answers with the memory engine: `data.pivotGroups(rows, body)` for a
+whole pivot, `data.pivotMembers(rows, body)`, `data.pivotCounts(rows, body).childCount(path)` and
+`data.pivotCells(rows, body)` (`values` and `count` of a row path and a column path) for the parts.
 
 ## ODataAdapter
 
