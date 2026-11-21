@@ -2,11 +2,18 @@ import type { FilterCondition } from './filter-condition';
 import type { FilterExpression } from './filter-expression';
 import type { FilterOperator } from './filter-operator';
 import { validateFilter } from './filter-validation';
+import type { PivotInterval } from './pivot-interval';
 
-export function where(field: string, op: FilterOperator, value?: unknown, caseSensitive?: boolean): FilterCondition {
+/**
+ * A condition on a field; `options` compares text with case (`true` alone does too), or the field through an
+ * `interval` (`where('date', '=', 2024, { interval: 'year' })`).
+ */
+export function where(field: string, op: FilterOperator, value?: unknown, options?: boolean | { caseSensitive?: boolean; interval?: PivotInterval }): FilterCondition {
   const condition: FilterCondition = { field, op };
   if (value !== undefined) condition.value = value;
-  if (caseSensitive) condition.caseSensitive = true;
+  const o = typeof options === 'object' ? options : { caseSensitive: options };
+  if (o.caseSensitive) condition.caseSensitive = true;
+  if (o.interval !== undefined) condition.interval = o.interval;
   return condition;
 }
 

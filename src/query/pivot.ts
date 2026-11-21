@@ -1,5 +1,6 @@
 import type { EvaluateContext } from './evaluate-context';
 import type { FieldType } from './field-type';
+import { intervalValue } from './interval-value';
 import type { PivotGroup } from './pivot-group';
 import type { PivotInterval } from './pivot-interval';
 import type { PivotKeep } from './pivot-keep';
@@ -13,6 +14,8 @@ import { type SummaryAccumulator, SummaryRule } from './summaries';
 import { ValueComparer } from './value-comparer';
 import { fieldTypeOf, getField, isEmpty, toDate } from './values';
 
+export { intervalValue, isPivotInterval } from './interval-value';
+
 type Comparable = string | number | boolean | null;
 
 /** The depths of an axis a backend computes: 0 is the total of the axis, 1 its top members. */
@@ -22,15 +25,8 @@ export interface PivotDepth {
   parents: readonly (readonly unknown[])[] | null;
 }
 
-const DATE_PARTS: readonly unknown[] = ['year', 'quarter', 'month', 'day', 'dayOfWeek', 'date'];
-
 /** The values a level of an axis keeps worked out; past them (a level of values all different) each is worked out per row. */
 const KNOWN_VALUES = 262_144;
-
-/** Whether a value is a `PivotInterval` (or `undefined`, no interval). */
-export function isPivotInterval(value: unknown): value is PivotInterval | undefined {
-  return value === undefined || DATE_PARTS.includes(value) || (typeof value === 'number' && Number.isFinite(value) && value > 0);
-}
 
 /**
  * The groups of a pivot over rows in memory (see `PivotGroup`): the rows `filter` passes and `keep` keeps, each counted
@@ -145,32 +141,6 @@ export function readPivotGroup(group: unknown, options: PivotLoadOptions<any>, f
   };
   if (Array.isArray(g.running)) out.running = g.running.map((v) => (v === null || v === undefined ? null : Number(v)));
   return out;
-}
-
-/** The value of a level's interval; `null` for an empty value or one the interval cannot read. */
-export function intervalValue(value: unknown, interval: PivotInterval | undefined): unknown {
-  if (isEmpty(value)) return null;
-  if (interval === undefined) return value;
-  if (typeof interval === 'number') {
-    const n = typeof value === 'number' ? value : Number(value);
-    return Number.isFinite(n) ? rangeStart(n, interval) : null;
-  }
-  const d = toDate(value);
-  if (!d) return null;
-  switch (interval) {
-    case 'year':
-      return d.getFullYear();
-    case 'quarter':
-      return Math.floor(d.getMonth() / 3) + 1;
-    case 'month':
-      return d.getMonth() + 1;
-    case 'day':
-      return d.getDate();
-    case 'dayOfWeek':
-      return d.getDay();
-    default:
-      return new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  }
 }
 
 /** Whether a row is kept by `keep`: its member on one of the levels the intervals make is one of the paths, or `filter` passes it. */
@@ -429,19 +399,4 @@ export function readValue(value: unknown, measure: PivotMeasure<any>): unknown {
   if (measure.type === 'count' || measure.type === 'countDistinct' || measure.type === 'sum') return Number(value ?? 0);
   if (measure.type === 'avg') return value === null ? null : Number(value);
   return value;
-}
-
-// Exact for the decimals the numbers are written with: 0.3 in ranges of 0.1 starts at 0.3, not 0.2.
-function rangeStart(n: number, width: number): number {
-  const places = Math.max(decimals(n), decimals(width));
-  if (places === 0 || places > 15) return Math.floor(n / width) * width;
-  const scale = 10 ** places;
-  const w = Math.round(width * scale);
-  return (Math.floor(Math.round(n * scale) / w) * w) / scale;
-}
-
-function decimals(n: number): number {
-  const [digits, exponent] = String(n).split('e');
-  const dot = digits.indexOf('.');
-  return Math.max(0, (dot < 0 ? 0 : digits.length - dot - 1) - Number(exponent ?? 0));
 }

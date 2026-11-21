@@ -2,6 +2,7 @@ import { isCondition } from '../query/filter-builders';
 import type { FilterCondition } from '../query/filter-condition';
 import type { FilterExpression } from '../query/filter-expression';
 import { validateFilter } from '../query/filter-validation';
+import type { PivotInterval } from '../query/pivot-interval';
 import { fieldTypeOf, isEmpty } from '../query/values';
 import type { ODataFilterOptions } from './odata-filter-options';
 import { odataLiteral, odataPath } from './odata-syntax';
@@ -61,16 +62,19 @@ function listCondition(c: FilterCondition, o: ODataFilterOptions): Part {
 }
 
 function condition(c: FilterCondition, o: ODataFilterOptions, path: string): Part {
-  const declared = o.fields?.[c.field];
+  // Through an interval the field reads as a number, or a date for the day.
+  const interval = c.interval;
+  const declared = interval === undefined ? o.fields?.[c.field] : interval === 'date' ? 'date' : 'number';
   const sample = Array.isArray(c.value) ? c.value.find((v) => !isEmpty(v)) : c.value;
   const textOp = TEXT_OPS.has(c.op);
   const type = textOp ? 'string' : (declared ?? fieldTypeOf(sample));
   const lower = type === 'string' && o.ignoreCase !== false && !c.caseSensitive;
-  const field = lower ? `tolower(${path})` : path;
+  const read = interval === undefined ? path : intervalPath(path, interval);
+  const field = lower ? `tolower(${read})` : read;
   const literal = (v: unknown) => (lower ? odataLiteral(textOf(v).toLocaleLowerCase(o.locale), 'string') : odataLiteral(v, type));
 
   // Blank is null, and for text also empty or only spaces. Without a declared type only text values tell.
-  const isText = declared ? declared === 'string' : typeof sample === 'string';
+  const isText = interval === undefined && (declared ? declared === 'string' : typeof sample === 'string');
   const blank = isText ? `(${path} eq null or trim(${path}) eq '')` : `${path} eq null`;
   const notBlank = isText ? `(${path} ne null and trim(${path}) ne '')` : `${path} ne null`;
 
@@ -113,4 +117,30 @@ function condition(c: FilterCondition, o: ODataFilterOptions, path: string): Par
 
 function textOf(v: unknown): string {
   return v instanceof Date ? v.toISOString() : String(v);
+}
+
+/**
+ * A field read through an interval, as OData writes it: quarters with integer division, a range starting at
+ * `floor(value / width) * width` taken in decimals. Throws a `TypeError` for the day of the week, which OData has no
+ * function for.
+ */
+export function intervalPath(path: string, interval: PivotInterval): string {
+  switch (interval) {
+    case 'year':
+      return `year(${path})`;
+    case 'quarter':
+      return `(month(${path}) add 2) div 3`;
+    case 'month':
+      return `month(${path})`;
+    case 'day':
+      return `day(${path})`;
+    case 'date':
+      return `date(${path})`;
+    case 'dayOfWeek':
+      throw new TypeError('no OData function reads the day of the week');
+    default: {
+      const width = String(interval);
+      return `floor(${path} div ${/[.e]/.test(width) ? width : `${width}.0`}) mul ${width}`;
+    }
+  }
 }

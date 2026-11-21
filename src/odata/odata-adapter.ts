@@ -32,7 +32,7 @@ import type { BatchRequestPart } from './batch-request-part';
 import type { BatchResponsePart } from './batch-response-part';
 import { readBatch, writeBatch } from './multipart-batch';
 import type { ODataAdapterOptions } from './odata-adapter-options';
-import { toODataFilter } from './odata-filter';
+import { intervalPath, toODataFilter } from './odata-filter';
 import { dayText, odataExpand, odataLiteral, odataPath } from './odata-syntax';
 
 // Sent with writes only: a read with no custom header needs no CORS preflight.
@@ -567,6 +567,17 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
     };
   }
 
+  /** Whether the service applies this filter: not one on the day of the week, which OData has no function for. */
+  override canFilter(filter: FilterExpression | null | undefined): boolean {
+    if (!filter) return true;
+    try {
+      this.filterText({ filter });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private filterText(o: LoadOptions): string {
     return o.filter ? toODataFilter(o.filter, { fields: this.fields, locale: this.locale, ignoreCase: this.odata.ignoreCase, collections: this.odata.collections }) : 'true';
   }
@@ -854,28 +865,9 @@ function byLength(paths: readonly (readonly unknown[])[]): Map<number, (readonly
   return out;
 }
 
-// Quarters with integer division; a range starts at `floor(value / width) * width`, the division taken in decimals.
 function intervalText(level: PivotLevel<any>): string {
-  const field = odataPath(level.field);
-  switch (level.interval) {
-    case 'year':
-      return `year(${field})`;
-    case 'quarter':
-      return `(month(${field}) add 2) div 3`;
-    case 'month':
-      return `month(${field})`;
-    case 'day':
-      return `day(${field})`;
-    case 'date':
-      return `date(${field})`;
-    case 'dayOfWeek':
-    case undefined:
-      throw new TypeError(`no OData function groups ${level.interval ?? 'without an interval'}`);
-    default: {
-      const width = String(level.interval);
-      return `floor(${field} div ${/[.e]/.test(width) ? width : `${width}.0`}) mul ${width}`;
-    }
-  }
+  if (level.interval === undefined) throw new TypeError('no OData function groups without an interval');
+  return intervalPath(odataPath(level.field), level.interval);
 }
 
 function keyType(level: PivotLevel<any>, key: unknown, fields: Readonly<Record<string, FieldType>>): FieldType {

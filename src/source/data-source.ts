@@ -298,6 +298,21 @@ export class DataSource<T = Record<string, unknown>, K = unknown> extends Dispos
     return this.adapter.loadPivotCells(this.pivotQuery(options));
   }
 
+  /**
+   * A new data source over the same adapter, for the rows of the current query (its filter and search, params, select
+   * and expand) that `filter` keeps too; `options` set the rest (`loadMode`, `pageSize`, `sort` …).
+   */
+  narrow(filter: FilterExpression | null, options: Omit<Partial<DataSourceOptions<T, K>>, 'adapter' | 'filter'> = {}): DataSource<T, K> {
+    return new DataSource<T, K>({
+      select: this.options.select,
+      expand: this.options.expand,
+      params: this.currentParams,
+      ...options,
+      adapter: this.adapter,
+      filter: and(this.queryFilter(), filter),
+    });
+  }
+
   /** A pivot's options over the current query: its filter with the pivot's own, and its params and expand unless the pivot has its own. */
   private pivotQuery<O extends { filter?: FilterExpression | null; params?: Readonly<Record<string, unknown>>; expand?: readonly string[] }>(options: O): O {
     const { filter, params, expand } = this.loadOptions(false);

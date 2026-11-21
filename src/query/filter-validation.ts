@@ -1,4 +1,5 @@
 import type { FilterExpression } from './filter-expression';
+import { isPivotInterval } from './interval-value';
 
 const OPERATORS = new Set([
   '=',
@@ -25,6 +26,7 @@ export function validateFilter(e: unknown, path = 'filter'): asserts e is Filter
     if (!OPERATORS.has(x.op as string)) throw new TypeError(`${path}: unknown operator "${String(x.op)}"`);
     if (x.op === 'between' && !(Array.isArray(x.value) && x.value.length === 2)) throw new TypeError(`${path}: "between" needs [from, to]`);
     if ((x.op === 'in' || x.op === 'notin') && !Array.isArray(x.value)) throw new TypeError(`${path}: "${x.op}" needs an array`);
+    if (x.interval !== undefined && !isPivotInterval(x.interval)) throw new TypeError(`${path}: unknown interval "${String(x.interval)}"`);
     return;
   }
   if (Array.isArray(x.and)) return x.and.forEach((c, i) => validateFilter(c, `${path}.and[${i}]`));

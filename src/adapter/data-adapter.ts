@@ -167,6 +167,14 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
   }
 
   /**
+   * Whether the backend applies this filter; one it cannot write (an OData condition on the day of the week) is left
+   * to the caller, who loads the rows without it and filters them in memory.
+   */
+  canFilter(_filter: FilterExpression | null | undefined): boolean {
+    return true;
+  }
+
+  /**
    * Members of one level of a pivot axis, a part of each slice's parent's children (see `PivotMembersOptions`), for a
    * view that loads as it scrolls. A backend with `capabilities.pivotWindow` computes them, unless they need memory;
    * otherwise the rows are loaded and grouped here.

@@ -160,7 +160,12 @@ parent and orders them here.
 `<>` `<` `<=` `>` `>=` `contains` `notcontains` `startswith` `endswith` `between` `in` `notin`
 `isblank` `isnotblank`. `data.none()` is a filter no row passes. A field that holds a list of values
 (an array) passes when one of its values does; with `<>`, `notin` and `notcontains`, when none does. A
-list with no value that is not blank is blank, an empty list too.
+list with no value that is not blank is blank, an empty list too. A condition with an `interval`
+(`data.where('date', '=', 2024, { interval: 'year' })`) compares the value the interval reads, as a pivot
+level groups it, a value it cannot read being blank; OData writes it with its date functions, and
+`adapter.canFilter(filter)` is `false` for one a backend cannot write (OData has no day of the week).
+`source.narrow(filter, options)` is a new data source over the same adapter for the rows of the current
+query that `filter` keeps too.
 
 **Events.** `onLoading`, `onInserting`, `onUpdating`, `onRemoving` come before the backend is called;
 listeners can change what is sent or set `cancel = true`. `onInserting` gets the object given to

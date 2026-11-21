@@ -51,6 +51,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   know them), the adapter reads each parent's children in their order and their values, and adds them up.
   `pivotCellGroups(rows, body)` answers a cells request as a server does: the groups with their running totals, those
   no row falls in among them (`count` 0).
+- Conditions through an interval: a filter condition's `interval` (`where('date', '=', 2024, { interval: 'year' })`)
+  compares the value the interval reads, as a pivot level groups it: a part of a date or the start of a range of
+  numbers; a value it cannot read is blank. Memory reads it as pivots do, OData writes `year()`, `month()`, `day()`,
+  `date()`, the quarter and the range, REST sends it in the filter. `canFilter(filter)` tells whether a backend applies a
+  filter: OData has no function for the day of the week.
+- `DataSource.narrow(filter, options)`: a new data source over the same adapter, for the rows of the current query
+  (filter and search, params, select, expand) that the filter keeps too.
 - Grouping in memory reads a date's part and a text's comparable form once per value, not once per row, finds a
   row's member by the row's value before working out how it compares, and orders members by forms worked out once;
   numbers of children are counted without grouping the children. A level of values all different keeps up to 262,144

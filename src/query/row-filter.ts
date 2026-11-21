@@ -3,6 +3,7 @@ import { isCondition } from './filter-builders';
 import type { FilterCondition } from './filter-condition';
 import type { FilterExpression } from './filter-expression';
 import { validateFilter } from './filter-validation';
+import { intervalValue } from './interval-value';
 import { ValueComparer } from './value-comparer';
 import { fieldTypeOf, getField, isEmpty } from './values';
 
@@ -33,7 +34,16 @@ interface ValueTest {
 }
 
 function conditionTest(c: FilterCondition, ctx: EvaluateContext): (row: unknown) => boolean {
-  const value = valueReader(c.field, ctx);
+  const field = valueReader(c.field, ctx);
+  // Through an interval, the value the interval reads; a value it cannot read is blank.
+  const interval = c.interval;
+  const value =
+    interval === undefined
+      ? field
+      : (row: unknown) => {
+          const v = field(row);
+          return Array.isArray(v) ? v.map((x) => intervalValue(x, interval)) : intervalValue(v, interval);
+        };
   // An empty field, an empty list of values too: `isblank`, and `=` / `<>` with an empty value.
   const askedEmpty = (c.op === '=' || c.op === '<>') && comparerOf(c, ctx).toComparable(c.value) === null;
   if (c.op === 'isblank' || c.op === 'isnotblank' || askedEmpty) {
@@ -107,8 +117,9 @@ function valueTest(c: FilterCondition, ctx: EvaluateContext): ValueTest | null {
   }
 }
 
-/** How the condition's field compares: its declared type, else the type of the condition's value. */
+/** How the condition's field compares: through its interval, its declared type, else the type of the condition's value. */
 function comparerOf(c: FilterCondition, ctx: EvaluateContext): ValueComparer {
+  if (c.interval !== undefined) return new ValueComparer(c.interval === 'date' ? 'date' : 'number', ctx.locale);
   const sample = Array.isArray(c.value) ? c.value.find((v) => !isEmpty(v)) : c.value;
   return new ValueComparer(ctx.fields?.[c.field] ?? fieldTypeOf(sample), ctx.locale, !!c.caseSensitive);
 }
