@@ -168,13 +168,14 @@ export function intervalValue(value: unknown, interval: PivotInterval | undefine
   }
 }
 
-/** Whether a row is kept by `keep`: its member on one of the levels the intervals make is one of the paths. */
+/** Whether a row is kept by `keep`: its member on one of the levels the intervals make is one of the paths, or `filter` passes it. */
 function keeper<T>(keep: PivotKeep<T>, ctx: EvaluateContext): (row: T) => boolean {
   const intervals: readonly (PivotInterval | undefined)[] = keep.intervals?.length ? keep.intervals : [undefined];
   const axis = new PivotAxis<T>(intervals.map((interval) => ({ field: keep.field, interval, value: keep.value })), ctx);
   const ids = new Set(keep.paths.filter((path) => path.length && path.length <= intervals.length).map((path) => axis.idOf(path)));
+  const passes = keep.filter ? createRowFilter<T>(keep.filter, ctx) : null;
   const include = keep.type !== 'exclude';
-  return (row) => axis.holds(row, ids) === include;
+  return (row) => (axis.holds(row, ids) || (passes !== null && passes(row))) === include;
 }
 
 /** Memory: a member of an axis while rows are grouped. */

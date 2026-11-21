@@ -30,14 +30,14 @@ export function defaultReadRows<T>(body: unknown, options: LoadOptions): LoadRes
 /**
  * The body a pivot sends: `{ filter, keep, rows, columns, measures, expandedRows, expandedColumns }`, the levels as
  * `{ field, interval, dir }`, the measures as `{ type, field, skipEmpty }` and the members kept as
- * `{ field, intervals, paths, type }`, missing ones left out; the filter is `null` without one, the expanded members
- * `true` for all.
+ * `{ field, intervals, paths, type, filter }`, missing ones left out; the filter is `null` without one, the expanded
+ * members `true` for all.
  */
 export function defaultPivotBody(options: PivotLoadOptions<any>): Record<string, unknown> {
   const level = ({ field, interval, dir }: PivotLevel<any>) => ({ field, interval, dir });
   return {
     filter: options.filter ?? null,
-    keep: (options.keep ?? []).map(({ field, intervals, paths, type }) => ({ field, intervals: intervals ?? [], paths, type: type ?? 'include' })),
+    keep: (options.keep ?? []).map(({ field, intervals, paths, type, filter }) => ({ field, intervals: intervals ?? [], paths, type: type ?? 'include', filter })),
     rows: (options.rows ?? []).map(level),
     columns: (options.columns ?? []).map(level),
     measures: (options.measures ?? []).map((m) => ({ type: m.type, field: m.field, skipEmpty: m.type === 'custom' ? undefined : m.skipEmpty })),

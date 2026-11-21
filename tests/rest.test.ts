@@ -261,6 +261,10 @@ describe('RestAdapter pivots', () => {
       expandedColumns: true,
     });
     expect([keys(p.rows), p.values(p.rows.children![1], p.columns), p.values(p.rows, p.columns)]).toEqual([['c1', 'c0'], [0], [60]]);
+    // A kept field's filter goes with its members.
+    api.calls.length = 0;
+    await adapter.loadPivot({ keep: [{ field: 'customer', paths: [['c1']], filter: where('amount', '>', 20) }] });
+    expect((api.calls[0].body as { keep: unknown }).keep).toEqual([{ field: 'customer', intervals: [], paths: [['c1']], type: 'include', filter: { field: 'amount', op: '>', value: 20 } }]);
   });
 
   it('writes and reads the endpoint its own way, and groups in memory without one', async () => {

@@ -1,3 +1,4 @@
+import type { FilterExpression } from './filter-expression';
 import type { PivotInterval } from './pivot-interval';
 
 /**
@@ -9,6 +10,7 @@ import type { PivotInterval } from './pivot-interval';
  * @example
  * { field: 'date', intervals: ['year', 'quarter'], paths: [[2024, 1], [2024, 2]] }
  * { field: 'country', paths: [['Germany'], [null]], type: 'exclude' }
+ * { field: 'date', intervals: ['year'], paths: [[2024]], filter: where('amount', '>', 1000) }
  */
 export interface PivotKeep<T = unknown> {
   field: string;
@@ -18,4 +20,9 @@ export interface PivotKeep<T = unknown> {
   value?: (row: T) => unknown;
   paths: readonly (readonly unknown[])[];
   type?: 'include' | 'exclude';
+  /**
+   * A row this filter passes counts as one of the members too: kept with `'include'`, left out with `'exclude'`. It
+   * joins members and conditions of their own, the way a pivot's header filter offers both.
+   */
+  filter?: FilterExpression;
 }

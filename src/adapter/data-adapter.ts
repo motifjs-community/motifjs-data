@@ -448,7 +448,15 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
         Array.isArray(k.paths) &&
         k.paths.every(Array.isArray) &&
         (k.type === undefined || k.type === 'include' || k.type === 'exclude');
-      if (!Array.isArray(o.keep) || !o.keep.every(keep)) throw invalid('keep items are { field, intervals?, value?, paths: arrays of keys, type?: "include" | "exclude" }');
+      if (!Array.isArray(o.keep) || !o.keep.every(keep)) throw invalid('keep items are { field, intervals?, value?, paths: arrays of keys, type?: "include" | "exclude", filter? }');
+      o.keep.forEach((k, i) => {
+        if (k.filter === undefined) return;
+        try {
+          validateFilter(k.filter, `keep[${i}].filter`);
+        } catch (e) {
+          throw invalid((e as Error).message);
+        }
+      });
       out.keep = o.keep.map((k) => ({ ...k, paths: k.paths.map((path: readonly unknown[]) => [...path]) }));
     }
     if (o.measures) {

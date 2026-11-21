@@ -294,7 +294,7 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
   }
 
   // `(year(OrderDate) eq 2024 and (month(OrderDate) add 2) div 3 eq 2) or (…)`, or `not (…)`: the rows `keep` keeps. Without
-  // intervals the keys are compared as a filter compares them (case, collections).
+  // intervals the keys are compared as a filter compares them (case, collections). Its `filter` joins them with `or`.
   private keepText(keep: PivotKeep<T>): string {
     const intervals = keep.intervals ?? [];
     let any: string;
@@ -315,6 +315,9 @@ export class ODataAdapter<T = Record<string, unknown>, K = unknown> extends Http
       const paths = keep.paths.filter((path) => path.length);
       any = paths.length === 1 ? one(paths[0]) : paths.map((path) => `(${one(path)})`).join(' or ');
     }
+    const also = keep.filter ? this.filterText({ filter: keep.filter }) : 'false';
+    if (also === 'true') any = 'true';
+    else if (also !== 'false') any = any === 'false' ? also : `(${any}) or (${also})`;
     return keep.type === 'exclude' ? `not (${any})` : any;
   }
 

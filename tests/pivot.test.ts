@@ -211,6 +211,29 @@ describe('loadPivot', () => {
     expect(errors).toEqual(bad.map(() => 'MJD302'));
   });
 
+  it('counts the rows the filter of a keep passes as its members: kept with them, or left out with them', () => {
+    const regions = (keep: data.PivotKeep<Sale>[]) => queryPivot(sales, { rows: [{ field: 'region' }], measures: [count], keep }, ctx).rows.children!.map((m) => [m.key, m.count]);
+    // 2024, or an amount of 100 and more: the first row, from 2023.
+    const members = { field: 'day', intervals: ['year'], paths: [[2024]], filter: where('amount', '>=', 100) } as const;
+    expect(regions([members])).toEqual([
+      ['North', 2],
+      ['South', 2],
+    ]);
+    expect(regions([{ ...members, type: 'exclude' }])).toEqual([
+      ['South', 1],
+      [null, 1],
+    ]);
+    // A filter without members.
+    expect(regions([{ field: 'units', paths: [], filter: where('units', '>', 4) }])).toEqual([
+      ['South', 1],
+      [null, 1],
+    ]);
+    expect(regions([{ field: 'units', paths: [], filter: where('units', '>', 4), type: 'exclude' }])).toEqual([
+      ['North', 2],
+      ['South', 2],
+    ]);
+  });
+
   it('keeps members in memory, and rejects a keep it cannot read', async () => {
     const adapter = new ArrayAdapter<Sale, number>({ data: sales, key: 'id', fields: { day: 'date' }, locale: 'en-US' });
     const p = await adapter.loadPivot({ rows: [{ field: 'region' }], measures: [count], keep: [{ field: 'day', intervals: ['year'], paths: [[2024]] }] });
@@ -221,6 +244,7 @@ describe('loadPivot', () => {
     ]);
     await expect(adapter.loadPivot({ keep: [{ field: 'day', intervals: ['week' as data.PivotInterval], paths: [] }] })).rejects.toMatchObject({ code: 'MJD302' });
     await expect(adapter.loadPivot({ keep: [{ field: 'day', paths: [2024] as never }] })).rejects.toMatchObject({ code: 'MJD302' });
+    await expect(adapter.loadPivot({ keep: [{ field: 'day', paths: [], filter: { field: 'amount', op: 'over' } as never }] })).rejects.toMatchObject({ code: 'MJD302', message: expect.stringContaining('keep[0].filter') });
   });
 
   it('runs on the query of a data source', async () => {

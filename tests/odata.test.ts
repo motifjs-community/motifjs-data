@@ -467,6 +467,11 @@ describe('ODataAdapter pivots', () => {
     service.calls.length = 0;
     await adapter.loadPivot({ measures: [{ type: 'count' }], keep: [{ field: 'region', paths: [['North'], [null]] }] });
     expect(service.calls[0].query.$apply).toBe(`filter(${data.toODataFilter(data.or(data.where('region', '=', 'North'), data.where('region', 'isblank'))!)})/aggregate($count as _n)`);
+    // A keep's filter joins its members with `or`, and stands alone without them.
+    service.calls.length = 0;
+    await adapter.loadPivot({ measures: [{ type: 'count' }], keep: [{ field: 'day', intervals: ['year'], paths: [[2024]], filter: data.where('amount', '>', 15), type: 'exclude' }] });
+    await adapter.loadPivot({ measures: [{ type: 'count' }], keep: [{ field: 'amount', paths: [], filter: data.where('amount', '>', 15) }] });
+    expect(service.calls.map((c) => c.query.$apply)).toEqual(['filter(not ((year(day) eq 2024) or (amount gt 15)))/aggregate($count as _n)', 'filter(amount gt 15)/aggregate($count as _n)']);
     // No OData function tells the day of the week, nor reads a computed value: the rows are kept in memory.
     service.calls.length = 0;
     const weekday = await adapter.loadPivot({ rows: [{ field: 'region' }], measures: [{ type: 'count' }], keep: [{ field: 'day', intervals: ['dayOfWeek'], paths: [[6]] }] });

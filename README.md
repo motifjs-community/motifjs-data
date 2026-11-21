@@ -113,7 +113,8 @@ its own (`value: (row) => …`), and `{ type: 'custom', start, add, result }` is
 both run in memory only. `keep` keeps rows by their members on levels of its own, read the way the axes
 read them, whether the field is on an axis or not: `{ field: 'OrderDate', intervals: ['year', 'quarter'],
 paths: [[1997], [1998, 1]] }` keeps 1997 and the first quarter of 1998, `type: 'exclude'` every row but
-those, and `null` in a path stands for empty values. A backend that computes pivots (`capabilities.pivot`:
+those, and `null` in a path stands for empty values; its `filter` counts the rows it passes among those members,
+kept or left out with them. A backend that computes pivots (`capabilities.pivot`:
 OData with `aggregation`, REST with `pivot`) is asked for the groups (`PivotGroup`); otherwise the matching
 rows are loaded and `queryPivot` groups them in memory.
 
