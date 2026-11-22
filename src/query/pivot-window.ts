@@ -25,12 +25,12 @@ export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions
   const levels = options.levels.slice(0, Math.min(depth + 1, options.levels.length));
   const upper = new PivotAxis<T>(options.levels.slice(0, depth), ctx);
   const find = options.find ?? [];
-  const parents = trieOf([...options.slices.map((slice) => slice.parent), ...find.map((path) => path.slice(0, depth))], upper);
+  const parents = trieOf([...options.slices.map((slice) => slice.parent), ...find.map((path) => path.slice(0, depth))], upper).root;
   const sort = options.sortBySummary;
   const path = sort?.path ?? [];
   const columns = (sort?.levels ?? []).slice(0, path.length);
-  const ids: string[] = [];
-  const under = depth ? rows.filter((row) => hits(row, upper, parents, ids) > 0) : rows;
+  const slots: number[] = [];
+  const under = depth ? rows.filter((row) => hits(row, upper, parents, slots) > 0) : rows;
   const query = { filter: options.filter, keep: options.keep, rows: levels, columns, measures: options.measures, expandedRows: true as const, expandedColumns: prefixes([path]) };
   const result = pivotResult(pivotGroups(under, query, ctx), query, ctx);
   const below = options.childCounts && depth + 1 < options.levels.length ? counted(under, options.levels.slice(0, depth + 2), true, options, ctx) : null;
@@ -134,32 +134,36 @@ export function pivotCells<T>(rows: readonly T[], options: PivotCellsOptions<T>,
   const pass = options.filter ? createRowFilter<T>(options.filter, ctx) : null;
   const keepers = (options.keep ?? []).map((keep) => keeper(keep, ctx));
   const rules = options.measures.map((measure) => measureRule(measure, ctx));
-  const cells = new Map<string, { count: number; sums: SummaryAccumulator[] }>();
-  const rowHits: string[] = [];
-  const columnHits: string[] = [];
+  // By the number of the row path times the paths across, plus that of the column path: no text is made per row.
+  const width = columnTrie.ids.length;
+  const cells: ({ count: number; sums: SummaryAccumulator[] } | undefined)[] = new Array(rowTrie.ids.length * width);
+  const rowHits: number[] = [];
+  const columnHits: number[] = [];
   const values: unknown[] = new Array(rules.length);
   for (const row of rows) {
     // The members asked for that the row falls in, found down the tree of their paths: a row under none leaves early.
-    const rowCount = hits(row, rowAxis, rowTrie, rowHits);
+    const rowCount = hits(row, rowAxis, rowTrie.root, rowHits);
     if (!rowCount) continue;
-    const columnCount = hits(row, columnAxis, columnTrie, columnHits);
+    const columnCount = hits(row, columnAxis, columnTrie.root, columnHits);
     if (!columnCount) continue;
     if (pass && !pass(row)) continue;
     if (keepers.length && !keepers.every((kept) => kept(row))) continue;
     // Each measure reads the row once for all its crossings.
     for (let k = 0; k < rules.length; k++) values[k] = rules[k].value(row);
     for (let r = 0; r < rowCount; r++) {
+      const line = rowHits[r] * width;
       for (let c = 0; c < columnCount; c++) {
-        const id = `${rowHits[r]}\u0002${columnHits[c]}`;
-        let cell = cells.get(id);
-        if (!cell) cells.set(id, (cell = { count: 0, sums: rules.map((rule) => rule.start()) }));
+        let cell = cells[line + columnHits[c]];
+        if (!cell) cells[line + columnHits[c]] = cell = { count: 0, sums: rules.map((rule) => rule.start()) };
         cell.count++;
         for (let k = 0; k < rules.length; k++) cell.sums[k].add(values[k], row);
       }
     }
   }
   const done = new Map<string, { count: number; values: readonly unknown[] }>();
-  for (const [id, cell] of cells) done.set(id, { count: cell.count, values: cell.sums.map((sum) => sum.result()) });
+  cells.forEach((cell, at) => {
+    if (cell) done.set(`${rowTrie.ids[Math.floor(at / width)]}\u0002${columnTrie.ids[at % width]}`, { count: cell.count, values: cell.sums.map((sum) => sum.result()) });
+  });
   const find = (rowPath: readonly unknown[], columnPath: readonly unknown[]) => done.get(`${rowAxis.idOf(rowPath)}\u0002${columnAxis.idOf(columnPath)}`);
   const own: PivotCellsResult = { values: (rowPath, columnPath) => find(rowPath, columnPath)?.values, count: (rowPath, columnPath) => find(rowPath, columnPath)?.count ?? 0 };
   if (!options.running?.length) return own;
@@ -313,33 +317,38 @@ function prefixes(paths: readonly (readonly unknown[])[], self = false): (readon
   return out;
 }
 
-/** The paths asked for as a tree of their keys' comparable values; a node a path ends on has the path's id. */
+/** The paths asked for as a tree of their keys' comparable values; a node a path ends on has the path's number (`slot`). */
 interface Trie {
-  id: string | null;
+  slot: number;
   children: Map<unknown, Trie> | null;
 }
 
-function trieOf<T>(paths: readonly (readonly unknown[])[], axis: PivotAxis<T>): Trie {
-  const root: Trie = { id: null, children: null };
+/** The tree of the paths, and the id of each path by its number: a path asked for twice has one number. */
+function trieOf<T>(paths: readonly (readonly unknown[])[], axis: PivotAxis<T>): { root: Trie; ids: string[] } {
+  const root: Trie = { slot: -1, children: null };
+  const ids: string[] = [];
   for (const path of paths) {
     let node = root;
     path.forEach((key, level) => {
       const c = axis.keyComparable(level, key);
       let next = (node.children ??= new Map()).get(c);
-      if (!next) node.children.set(c, (next = { id: null, children: null }));
+      if (!next) node.children.set(c, (next = { slot: -1, children: null }));
       node = next;
     });
-    node.id = axis.idOf(path);
+    if (node.slot < 0) {
+      node.slot = ids.length;
+      ids.push(axis.idOf(path));
+    }
   }
-  return root;
+  return { root, ids };
 }
 
-/** The ids of the paths asked for that a row falls in, written into `out`; returns their number. */
-function hits<T>(row: T, axis: PivotAxis<T>, trie: Trie, out: string[]): number {
+/** The numbers of the paths asked for that a row falls in, written into `out`; returns how many. */
+function hits<T>(row: T, axis: PivotAxis<T>, trie: Trie, out: number[]): number {
   let n = 0;
   let node: Trie | undefined = trie;
   for (let level = 0; node; level++) {
-    if (node.id !== null) out[n++] = node.id;
+    if (node.slot >= 0) out[n++] = node.slot;
     if (!node.children) break;
     node = node.children.get(axis.comparableOf(row, level));
   }

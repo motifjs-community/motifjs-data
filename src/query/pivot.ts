@@ -307,8 +307,26 @@ export class PivotAxis<T> {
       byId.set(id, member);
     }
     // An axis without levels has a root without children.
-    for (const member of byId.values()) if (member.children?.length) member.children.sort(this.order(member.path.length));
+    for (const member of byId.values()) if (member.children?.length) member.children = this.sorted(member.path.length, member.children);
     return byId;
+  }
+
+  /**
+   * Members of a level in the level's order (see `order`), each one's comparable value worked out once: not twice for
+   * every comparison of a sort.
+   */
+  private sorted(level: number, members: readonly PivotMember[]): PivotMember[] {
+    const { dir, field, interval } = this.levels[level];
+    const sign = dir === 'desc' ? -1 : 1;
+    const own = interval === undefined ? this.ctx.groupCompare?.(field) : undefined;
+    const keyed = members.map((member) => ({ member, c: this.knownComparable(level, member.key) }));
+    const first = keyed.find((k) => k.c !== null);
+    const comparer = first ? this.comparerOf(level, first.member.key) : null;
+    keyed.sort((a, b) => {
+      if (a.c === null || b.c === null) return a.c === b.c ? 0 : a.c === null ? 1 : -1;
+      return sign * (own ? own(a.member.key, b.member.key) : comparer!.compare(a.c, b.c));
+    });
+    return keyed.map((k) => k.member);
   }
 
   private knownComparable(level: number, key: unknown): Comparable {

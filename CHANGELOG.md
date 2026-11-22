@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Changed
+
+- Pivot cells over rows in memory (`pivotCells`, `pivotCellGroups`) find a row's crossings by their numbers instead of a
+  text made for each row, and a level's members are ordered with each one's comparable value worked out once, not
+  twice for every comparison: the cells of a million rows about a third faster, 100,000 members ordered about a sixth
+  faster, the same answers.
+
 ## [0.1.0-beta.2] - 2026-11-22
 
 ### Added
