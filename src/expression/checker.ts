@@ -39,16 +39,21 @@ const kindsText = (kinds: readonly ParamKind[]) => kinds.map((k) => (k === 'temp
 const isNumber = (t: ExpressionType) => t.name === 'number' || t.name === 'any' || t.name === 'null';
 const isTemporal = (t: ExpressionType) => t.name === 'date' || t.name === 'datetime';
 
-class Checker {
-  readonly problems: ExpressionProblem[] = [];
-  private readonly source: string;
-  private readonly roots: Map<string, ExpressionType>;
-  private readonly functions: Map<string, ExpressionFunction>;
+/** Told of each node as it is checked: its type, and the names known there (a short function's parameters too). */
+export type CheckWatch = (node: ExpressionNode, type: ExpressionType, scope: ReadonlyMap<string, ExpressionType>) => void;
 
-  constructor(source: string, schema: ExpressionSchema, functions: Map<string, ExpressionFunction>) {
+export class Checker {
+  readonly problems: ExpressionProblem[] = [];
+  readonly roots: Map<string, ExpressionType>;
+  readonly functions: Map<string, ExpressionFunction>;
+  private readonly source: string;
+  private readonly watch: CheckWatch | undefined;
+
+  constructor(source: string, schema: ExpressionSchema, functions: Map<string, ExpressionFunction>, watch?: CheckWatch) {
     this.source = source;
     this.roots = new Map(Object.entries(schema).map(([name, t]) => [name, schemaType(t)]));
     this.functions = functions;
+    this.watch = watch;
   }
 
   private text(node: ExpressionNode): string {
@@ -56,6 +61,12 @@ class Checker {
   }
 
   typeOf(node: ExpressionNode, scope: ReadonlyMap<string, ExpressionType>): ExpressionType {
+    const found = this.typeOfNode(node, scope);
+    this.watch?.(node, found, scope);
+    return found;
+  }
+
+  private typeOfNode(node: ExpressionNode, scope: ReadonlyMap<string, ExpressionType>): ExpressionType {
     switch (node.kind) {
       case 'literal':
         if (node.type === 'date') return DATE;
@@ -226,13 +237,17 @@ class Checker {
   }
 }
 
+/** The functions known by name: the library's, and the application's over them. */
+export function functionsOf(library: readonly ExpressionFunction[], own: readonly ExpressionFunction[] = []): Map<string, ExpressionFunction> {
+  return new Map([...library, ...own].map((fn) => [fn.name, fn]));
+}
+
 /**
  * Checks an expression against the types of the names it is given (`schema`): the type of its value, and its problems
  * where they are. The functions of the library and the application's are known.
  */
 export function check(tree: ExpressionTree, schema: ExpressionSchema, library: readonly ExpressionFunction[], options: CheckOptions = {}): CheckResult {
-  const functions = new Map([...library, ...(options.functions ?? [])].map((fn) => [fn.name, fn]));
-  const checker = new Checker(tree.source, schema, functions);
+  const checker = new Checker(tree.source, schema, functionsOf(library, options.functions));
   const found = checker.typeOf(tree.root, new Map());
   const expect = options.expect === undefined ? undefined : schemaType(options.expect);
   if (expect && !fits(found, expect)) checker.problems.push(problem('resultType', tree.root.at, { found: typeText(found), expected: typeText(expect) }));

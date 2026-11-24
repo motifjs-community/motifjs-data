@@ -69,6 +69,12 @@ class Parser {
     throw new ReadFailure(problem('unexpectedToken', t.at, { found: shown(t), expected }));
   }
 
+  /** The comma before the next item, where the mark that closes the items could also stand. */
+  private next(close: string): void {
+    if (!this.is(',')) this.fail(`',' or '${close}'`);
+    this.advance();
+  }
+
   is(text: string): boolean {
     return this.token.text === text && (this.token.type === 'punct' || this.token.type === 'keyword');
   }
@@ -148,7 +154,7 @@ class Parser {
     this.advance();
     const items: ExpressionNode[] = [];
     while (!this.is(close)) {
-      if (items.length) this.expect(',');
+      if (items.length) this.next(close);
       items.push(call ? this.argument() : this.expression());
     }
     return { items, end: this.expect(close).at[1] };
@@ -253,7 +259,7 @@ class Parser {
     const open = this.advance();
     const entries: { key: string; value: ExpressionNode }[] = [];
     while (!this.is('}')) {
-      if (entries.length) this.expect(',');
+      if (entries.length) this.next('}');
       const key = this.token;
       if (key.type !== 'name' && key.type !== 'text' && key.type !== 'keyword') this.fail('a name');
       this.advance();

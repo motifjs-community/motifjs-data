@@ -131,6 +131,9 @@ describe('expression, reading', () => {
     expect(problemOf('a b')).toMatchObject({ code: 'unexpectedToken', at: [2, 3], message: 'b was not expected here; an operator or the end was.' });
     expect(problemOf('(a + 1)(2)')).toMatchObject({ code: 'unexpectedToken' });
     expect(problemOf('a @ b')).toMatchObject({ code: 'unexpectedToken', at: [2, 3] });
+    expect(problemOf('sum(rows').message).toBe("The expression ends too soon: ',' or ')' is missing.");
+    expect(problemOf('[1 2]').message).toBe("2 was not expected here; ',' or ']' was.");
+    expect(problemOf('{ a: 1 b: 2 }').message).toBe("b was not expected here; ',' or '}' was.");
   });
 
   it('reads a template: its text and its expressions, {{ written with \\{{', () => {
