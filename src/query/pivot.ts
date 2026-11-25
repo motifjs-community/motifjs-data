@@ -232,7 +232,29 @@ export class PivotAxis<T> {
 
   /** The comparable value of a row's member on a level: what tells it apart from the others. */
   comparableOf(row: T, level: number): Comparable {
-    const value = this.readers[level](row);
+    return this.valueComparable(level, this.readers[level](row));
+  }
+
+  /** A row's value on a level, as it is. */
+  rowValue(row: T, level: number): unknown {
+    return this.readers[level](row);
+  }
+
+  /** The key of the member a row's value on a level falls in. */
+  valueKey(level: number, value: unknown): unknown {
+    return this.keyOf(level, value);
+  }
+
+  /**
+   * Whether the member of a row's value may be kept by the value as it is: no object, none of the many values an
+   * interval has, and no more than `KNOWN_VALUES` of them.
+   */
+  keepsValue(level: number, value: unknown): boolean {
+    return this.levels[level].interval === undefined && value !== null && typeof value !== 'object' && this.byValues++ < KNOWN_VALUES;
+  }
+
+  /** The comparable value of the member a row's value on a level falls in. */
+  valueComparable(level: number, value: unknown): Comparable {
     if (this.levels[level].interval === undefined || value === null || typeof value === 'object') return this.knownComparable(level, this.keyOf(level, value));
     // A value of a level with an interval finds its part's at once, not its part first.
     const known = this.parts[level];
@@ -327,7 +349,7 @@ export class PivotAxis<T> {
    * Members of a level in the level's order (see `order`), each one's comparable value worked out once: not twice for
    * every comparison of a sort.
    */
-  private sorted(level: number, members: readonly PivotMember[]): PivotMember[] {
+  sorted<M extends { readonly key: unknown }>(level: number, members: readonly M[]): M[] {
     const { dir, field, interval } = this.levels[level];
     const sign = dir === 'desc' ? -1 : 1;
     const own = interval === undefined ? this.ctx.groupCompare?.(field) : undefined;

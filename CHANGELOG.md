@@ -31,8 +31,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   text made for each row, and a level's members are ordered with each one's comparable value worked out once, not
   twice for every comparison: the cells of a million rows about a third faster, 100,000 members ordered about a sixth
   faster, the same answers.
-- `pivotMembers` over rows in memory looks each slice's parent, and each member to `find`, up by its key instead of
-  searching for it among its siblings: the children of 12,500 members at once in under a second, the same answers.
+- `pivotMembers` and `pivotBlocks` over rows in memory find the children asked for in one pass over the rows, each row
+  added to nothing but them, where they grouped the rows on every level above as well: 12,500 customers of 125,000 rows
+  with the number of members below each in about half the time, the years of 5,000 customers in about a third. A slice's
+  parent, and each member to `find`, is looked up by its key instead of searched for among its siblings. The same answers.
 
 ## [0.1.0-beta.2] - 2026-11-22
 

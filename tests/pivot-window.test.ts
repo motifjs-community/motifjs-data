@@ -82,6 +82,45 @@ describe('pivot windows in memory', () => {
     expect(performance.now() - started).toBeLessThan(4000);
   });
 
+  it('gives what the whole pivot gives on every level: texts without case, empty keys, dates, every order', () => {
+    let seed = 5;
+    const pick = <V>(list: readonly V[]): V => list[Math.floor((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296 * list.length)];
+    const rows = Array.from({ length: 400 }, (_, id) => ({
+      id,
+      region: pick(['North', 'north', 'SOUTH', 'South', null, '']),
+      city: pick(['Oslo', 'oslo', 'Rome', 'Kyiv 2', 'Kyiv 10', null]),
+      day: pick(['2023-01-31', '2023-11-02', '2024-02-29', '2024-07-04', null]),
+      amount: pick([null, 1, 2.5, 40]),
+    }));
+    const measures = [sum, { type: 'avg', field: 'amount' }] as const;
+    for (const levels of [[region, city, year], [city, quarter, region], [{ ...year, dir: 'desc' }, { ...region, dir: 'desc' }, city]] as const) {
+      const whole = queryPivot(rows, { rows: levels, columns: [year], measures }, ctx);
+      const in2024 = whole.columns.children!.find((c) => c.key === 2024)!;
+      const open = (m: data.PivotMember): data.PivotMember[] => (m.children ? [m, ...m.children.flatMap(open)] : []);
+      for (const parent of open(whole.rows)) {
+        const children = parent.children!;
+        const asked = { levels, slices: [{ parent: parent.path }], measures };
+        const r = pivotMembers(rows, { ...asked, childCounts: true, descendants: 2, find: children.map((c) => c.path) }, ctx);
+        expect(r.slices[0].members.map((m) => [m.key, m.count, m.values, m.childCount, m.descendants])).toEqual(
+          children.map((c) => [c.key, c.count, whole.values(c, whole.columns), c.children?.length ?? 0, [c.children?.length ?? 0, (c.children ?? []).reduce((n, d) => n + (d.children?.length ?? 0), 0)]]),
+        );
+        expect(r.found).toEqual(children.map((_, i) => i));
+        // By the sum in 2024: those without a row then last, the others in the order of their keys where it is the same.
+        const at = (c: data.PivotMember) => whole.values(c, in2024)?.[0] as number | undefined;
+        const bySum = pivotMembers(rows, { ...asked, sortBySummary: { measure: 0, levels: [year], path: [2024] } }, ctx);
+        const sign = levels[parent.path.length] && 'dir' in levels[parent.path.length] ? -1 : 1;
+        expect(bySum.slices[0].members.map((m) => m.key)).toEqual(
+          [...children].sort((a, b) => (at(a) === undefined || at(b) === undefined ? Number(at(a) === undefined) - Number(at(b) === undefined) : sign * (at(a)! - at(b)!))).map((c) => c.key),
+        );
+      }
+    }
+  });
+
+  it('keeps the order of the keys where the member ordered by is deeper than its levels', () => {
+    const r = pivotMembers(sales, { levels: [region], slices: [{ parent: [] }], measures: [sum], sortBySummary: { measure: 0, levels: [year], path: [2024, 1] } }, ctx);
+    expect(keysOf(r)[0][1]).toEqual(['East', 'North', 'South', null]);
+  });
+
   it('counts the children of members on any level', () => {
     const r = pivotCounts(sales, { levels: [region, city, year], paths: [[], ['South'], ['South', 'Rome'], ['Nowhere land']] }, ctx);
     expect([r.childCount([]), r.childCount(['south']), r.childCount(['South', 'Rome']), r.childCount(['Nowhere land'])]).toEqual([4, 2, 1, 0]);
