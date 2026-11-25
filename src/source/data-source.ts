@@ -11,6 +11,8 @@ import { queryArray } from '../query/local-query';
 import type { EvaluateContext } from '../query/evaluate-context';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import type { PivotBlocksOptions } from '../query/pivot-blocks-options';
+import type { PivotBlocksResult } from '../query/pivot-blocks-result';
 import type { PivotCellsOptions } from '../query/pivot-cells-options';
 import type { PivotCellsResult } from '../query/pivot-cells-result';
 import type { PivotCountsOptions } from '../query/pivot-counts-options';
@@ -294,6 +296,11 @@ export class DataSource<T = Record<string, unknown>, K = unknown> extends Dispos
   /** The number of children of members of a pivot axis over the current query (see `DataAdapter.loadPivotCounts`). */
   loadPivotCounts(options: PivotCountsOptions<T>): Promise<PivotCountsResult> {
     return this.adapter.loadPivotCounts(this.pivotQuery(options));
+  }
+
+  /** How many members stand below children of members of a pivot axis, in blocks, over the current query (see `DataAdapter.loadPivotBlocks`). */
+  loadPivotBlocks(options: PivotBlocksOptions<T>): Promise<PivotBlocksResult> {
+    return this.adapter.loadPivotBlocks(this.pivotQuery(options));
   }
 
   /** The measures where some row and column members cross, over the current query (see `DataAdapter.loadPivotCells`). */

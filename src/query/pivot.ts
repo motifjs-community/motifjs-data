@@ -191,6 +191,8 @@ export class PivotAxis<T> {
   private readonly comparables: Map<unknown, Comparable>[];
   /** The key of each value that is no object, by level with an interval: a date's year is read once per value, not once per row. */
   private readonly intervals: Map<unknown, unknown>[];
+  /** The comparable value of the key of each value that is no object, by level with an interval. */
+  private readonly parts: Map<unknown, Comparable>[];
   /** The members shown below the top: the ids of the expanded ones, or `true` for all. */
   private readonly expanded: Set<string> | true;
   /** Memory: the root of the members found so far. */
@@ -209,6 +211,7 @@ export class PivotAxis<T> {
     this.readers = levels.map((level) => level.value ?? (ctx.groupValue?.(level.field) as ((row: T) => unknown) | undefined) ?? ((row: T) => getField(row, level.field)));
     this.comparables = levels.map(() => new Map());
     this.intervals = levels.map(() => new Map());
+    this.parts = levels.map(() => new Map());
     this.expanded = expanded === undefined || expanded === true ? true : new Set(expanded.map((path) => this.idOf(path)));
   }
 
@@ -229,7 +232,16 @@ export class PivotAxis<T> {
 
   /** The comparable value of a row's member on a level: what tells it apart from the others. */
   comparableOf(row: T, level: number): Comparable {
-    return this.knownComparable(level, this.keyOf(level, this.readers[level](row)));
+    const value = this.readers[level](row);
+    if (this.levels[level].interval === undefined || value === null || typeof value === 'object') return this.knownComparable(level, this.keyOf(level, value));
+    // A value of a level with an interval finds its part's at once, not its part first.
+    const known = this.parts[level];
+    let c = known.get(value);
+    if (c === undefined) {
+      c = this.knownComparable(level, this.keyOf(level, value));
+      if (known.size < KNOWN_VALUES) known.set(value, c);
+    }
+    return c;
   }
 
   /** The comparable value of a key on a level. */

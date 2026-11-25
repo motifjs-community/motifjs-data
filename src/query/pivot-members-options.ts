@@ -22,6 +22,11 @@ export interface PivotMembersOptions<T = unknown> {
   /** Also counts each member's children on the next level. */
   childCounts?: boolean;
   /**
+   * Also counts the members below each member on this many levels (`descendants` of each member): its children, their
+   * children, and so on, without those `nonEmpty` leaves out.
+   */
+  descendants?: number;
+  /**
    * Members of the level whose places among their parent's children are wanted, by their keys from the top: where a
    * view places a member shown open that the parts it loaded do not hold.
    */

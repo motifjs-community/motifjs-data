@@ -6,12 +6,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- `loadPivotBlocks` on every adapter and on `DataSource` (`PivotBlocksOptions`, `PivotBlocksResult`; in memory
+  `pivotBlocks`, and `readPivotBlocks` for a backend's answer) counts the members below the children of members, a block
+  of children at a time in the order `loadPivotMembers` gives them, and `descendants` of `loadPivotMembers` counts them
+  for each member of a part: a view places members open by default without reading every one. A backend says it
+  computes them with `capabilities.pivotBlocks`; one that does not works on as it was. REST: `pivot: { blocks: true }`
+  (`kind: 'blocks'`). OData: wherever it computes parts, two reads a parent and level, keys and counts alone.
+- `SoapAdapter`: a `pivot` operation computes pivots, whole and in parts, with the bodies and answers of a REST pivot
+  endpoint as JSON text (`window`, `blocks`, `args`, `read`); without it they are grouped in memory as before.
+- `ODataAdapter`: `aggregation: { pageSize }` asks for the `$apply` reads of every group in an order in pages.
+- `ODataAdapter`: `aggregation: { conditional: true }` says the service takes `case` in `compute` (OData 4.01). Pivot
+  members ordered by a measure in a member of the other axis (`sortBySummary` with `path`) are then counted and paged
+  on the service like the other orders — the measure fed only that member's rows through computed values, members
+  without a row in it last — instead of every member of the parent being read and ordered in memory, which stays the
+  way without the option.
+
 ### Changed
 
+- `ODataAdapter` follows the pages (`@odata.nextLink`) a service cuts an answer to `$apply` into: the groups past the
+  first page were missing.
 - Pivot cells over rows in memory (`pivotCells`, `pivotCellGroups`) find a row's crossings by their numbers instead of a
   text made for each row, and a level's members are ordered with each one's comparable value worked out once, not
   twice for every comparison: the cells of a million rows about a third faster, 100,000 members ordered about a sixth
   faster, the same answers.
+- `pivotMembers` over rows in memory looks each slice's parent, and each member to `find`, up by its key instead of
+  searching for it among its siblings: the children of 12,500 members at once in under a second, the same answers.
 
 ## [0.1.0-beta.2] - 2026-11-22
 

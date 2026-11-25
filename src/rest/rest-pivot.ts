@@ -15,8 +15,10 @@ export interface RestPivot<T> {
   read?: (body: unknown, options: PivotLoadOptions<T>) => unknown[];
   /** `false` for an endpoint that answers whole pivots only: a view then loads the pivot whole. Default `true`. */
   window?: boolean;
+  /** The endpoint answers `kind: 'blocks'` and members' `descendants` (`capabilities.pivotBlocks`). Default `false`: they are worked out in memory. */
+  blocks?: boolean;
   /** The body of a part. Default: `defaultPivotPartBody`. */
   writePart?: (kind: RestPivotPart, options: RestPivotPartOptions<T>) => unknown;
-  /** A part's answer as `loadPivotMembers`, `loadPivotCounts` or `loadPivotCells` read it. Default: `defaultReadPivotPart`. */
+  /** A part's answer as `loadPivotMembers`, `loadPivotCounts`, `loadPivotCells` or `loadPivotBlocks` read it. Default: `defaultReadPivotPart`. */
   readPart?: (kind: RestPivotPart, body: unknown, options: RestPivotPartOptions<T>) => unknown;
 }

@@ -132,6 +132,9 @@ m.slices[0].total;   // every customer of France
 m.slices[0].members; // [{ key, path, count, values }] — values at the total of the columns
 // Where members shown open stand: the number of their children.
 const c = await source.loadPivotCounts({ levels, paths: [[], ['France']] });
+// Where the lines of members open by default stand: what is below each part of 100 customers, counted.
+const b = await source.loadPivotBlocks({ levels, parents: [['France']], size: 100, depth: 1 });
+b.blocks[0]; // { parent, total, counts: [[100, 340], [11, 37]] } — the customers of a part, the members below them
 // The values where those rows and the columns on screen cross, totals included.
 const v = await source.loadPivotCells({ rows: levels, columns, measures, rowPaths, columnPaths });
 v.values(['France', 'BLONP'], [1997]);
@@ -151,6 +154,13 @@ by its measures. `loadPivotCounts` gives the number of children of members (with
 member at its depth (`[]` is a total); with `running` (`[{ measure, axis: 'rows', orders? }]`) also the running
 totals, `running(rowPath, columnPath)`: a measure added up over a member's siblings, in their order, up to it. A
 backend that gives no running totals has them added up by the adapter from each parent's children and their values.
+`loadPivotBlocks` counts what stands below the children of `parents` (all on one level), a block of `size` children at
+a time (one block without it), in the order `loadPivotMembers` gives them and with its `sortBySummary` and `nonEmpty`:
+per block the number of its children, then of the members on each of `depth` levels below them. A view that shows a
+level open by default so knows where every line stands without reading every member; `descendants` of
+`loadPivotMembers` gives the same numbers for each member of a part. A backend with `capabilities.pivotBlocks` computes
+them (OData with `aggregation`, REST and SOAP where their `pivot` says `blocks: true`), so an endpoint written before
+them works on as it was; otherwise they are worked out in memory.
 Members are found by their keys the way members are told apart
 (text without case, dates by day). A backend with `capabilities.pivotWindow` (OData with `aggregation`,
 REST with `pivot` unless `window: false`) computes them; otherwise the rows are loaded and grouped in
@@ -158,8 +168,17 @@ memory, as for `loadPivot`. OData pages with `$orderby`, `$skip`, `$top` and `$c
 member apart (a service orders empty values its own way), and orders by a measure in two rounds: the
 groups its value tells apart (a sum above, at and below 0; another measure with and without a value) are
 counted, then paged. Ordered by a measure in a member of the other axis, it reads every member of the
-parent and orders them here. With `nonEmpty` each read filters the members on their measures after it
-aggregates them (`…/groupby((ShipCountry),aggregate(…))/filter(_m0 ne null or _m1 ne null)`).
+parent and orders them here — unless `aggregation: { conditional: true }` says the service takes `case`
+in `compute` (OData 4.01): then that order is counted and paged on the service like the others, the
+measure fed only that member's rows through computed values
+(`compute(case(year(OrderDate) eq 2024:Freight) as _v)/groupby((ShipCountry),aggregate(…,_v with sum as _s))`),
+members without a row in that member last whatever the direction. With `nonEmpty` each read filters the
+members on their measures after it
+aggregates them (`…/groupby((ShipCountry),aggregate(…))/filter(_m0 ne null or _m1 ne null)`). No standard
+`$apply` sums a block of groups, so for `loadPivotBlocks` OData reads the members below counted per child, keys and
+counts alone, two reads per parent and level (`…/groupby((ShipCountry,CustomerID))/groupby((ShipCountry),aggregate($count as _c))`,
+the empty child apart, as it never reaches `$orderby`), and adds the blocks up here. `aggregation: { pageSize: 5000 }` asks for these reads, and for a level read whole, in
+pages of as many rows as the service takes in `$top`; without it the pages the service cuts an answer into are followed.
 
 **Filters are plain data:** `data.where(field, op, value)` joined with `data.and`, `data.or`, `data.not`. Operators: `=`
 `<>` `<` `<=` `>` `>=` `contains` `notcontains` `startswith` `endswith` `between` `in` `notin`
@@ -391,9 +410,14 @@ the members whose measures are all empty are left out of the answer: of `members
 level (with `nonEmpty`, of those whose measures are not all empty), and `{ "kind": "cells", …, "rows", "columns", "measures", "rowPaths", "columnPaths" }` with the
 groups of every row path and column path asked, as for a whole pivot; a body with `running` may be answered
 with each group's `running` too (and the crossings no row falls in, `count` 0), or without them, which the
-adapter then adds up. `writePart` and `readPart` change them. A server that holds the rows answers with the
-memory engine: `data.pivotGroups(rows, body)` for a whole pivot, `data.pivotMembers(rows, body)`,
-`data.pivotCounts(rows, body).childCount(path)` and `data.pivotCellGroups(rows, body)` for the parts.
+adapter then adds up. With `pivot: { blocks: true }` the endpoint is asked for two more things:
+`{ "kind": "blocks", …, "levels", "parents", "size", "depth", "measures", "sortBySummary", "nonEmpty" }` (`size` is
+`null` for one block per parent), answered with `{ "blocks": [{ "total": 111, "counts": [[100, 340], [11, 37]] }] }`, one
+per parent, a list of `depth + 1` numbers per block; and a members body with `"descendants": 1`, whose members are
+answered with their own, `"descendants": [12]`. `writePart` and `readPart` change them. A server that holds the rows
+answers with the memory engine: `data.pivotGroups(rows, body)` for a whole pivot, `data.pivotMembers(rows, body)`,
+`data.pivotCounts(rows, body).childCount(path)`, `data.pivotCellGroups(rows, body)` and `data.pivotBlocks(rows, body)`
+for the parts.
 
 ## ODataAdapter
 
@@ -431,7 +455,10 @@ Pivots too: one `groupby` per pair of depths of their axes, under the expanded m
 `aggregation: { batch: true }` sends those reads in one `$batch` request. A level with an interval needs
 `aggregation: { compute: true }`, a service that takes `compute` (`year()`, `month()`, `day()`,
 `date()`, `floor()`; dates by the service's clock), or it is grouped in memory; `'dayOfWeek'` has no
-OData function and is always grouped in memory. `keep` becomes a `filter` with the same functions, which
+OData function and is always grouped in memory. `aggregation: { conditional: true }` says the service
+takes `case` in `compute` (OData 4.01): pivot members ordered by a measure in a member of the other axis
+are then counted and paged on the service; without it every member of the parent is read and ordered in
+memory. `keep` becomes a `filter` with the same functions, which
 needs no `compute`: `filter(year(OrderDate) eq 1997)`; a `keep` by the day of the week, or by a computed
 value, keeps its rows in memory.
 
@@ -469,6 +496,11 @@ arguments `args` returns, in the operation's parameter order. What `load` does n
 (`filter`, `sort`, `paging`, `count`, `select`) runs in memory; with `handles: ['paging', 'sort', 'count']`
 the operation gets `skip`, `take` and `sort`, and its `read` returns `{ rows, total }`. A `save`
 operation sends many changes in one call.
+
+A `pivot` operation (`pivot: { name: 'Pivot' }`) computes pivots, whole and in parts, as a REST pivot endpoint does:
+it is called with `kind` (`'whole'`, `'members'`, `'counts'`, `'cells'`, `'blocks'`) and `body`, the JSON text of the
+body REST sends for it, and answers the JSON text of the REST answer (XML carries no types). `args` and `read` change
+both sides; `window: false` and `blocks: true` mean what they mean for REST. Without it pivots are grouped in memory.
 
 Objects are written the way WCF's `DataContractSerializer` reads them: fields in `dataNamespace`, in
 alphabetical order, the fields of a base class first (`firstFields`). WCF skips a field that is out of

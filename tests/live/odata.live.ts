@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { data } from '../../src';
-const { and, ChangeTracker, DataSource, not, ODataAdapter, or, queryArray, queryPivot, sortRows, where } = data;
+const { and, ChangeTracker, DataSource, not, ODataAdapter, or, pivotBlocks, pivotCells, pivotCounts, pivotMembers, queryArray, queryPivot, sortRows, where } = data;
 
 // Northwind is read only; TripPinServiceRW keeps writes in a private session per run.
 const NORTHWIND = 'https://services.odata.org/V4/Northwind/Northwind.svc/';
@@ -209,6 +209,136 @@ describe('ODataAdapter on TripPin RESTier ($apply)', () => {
     expect(requests).toEqual([expect.stringMatching(/^POST .*\/\$batch$/)]);
     const cells = (p: data.PivotLoadResult) => [p.rows, ...p.rows.children!].map((r) => [r.key, r.count, [p.columns, ...p.columns.children!].map((c) => p.values(r, c)?.[0] ?? 0)]);
     expect(cells(server)).toEqual(cells(memory));
+  });
+});
+
+// A pivot read in parts on a real `$apply` service. TripPin RESTier takes `$count`, `$skip`, `$top` and `$orderby` on
+// aggregate aliases after `$apply`, so members, child counts and cells page there and are compared with memory over
+// every row. What it does not take stays out of these tests:
+// - `compute` answers 500 and `case` a parse error (a 4.0 parser), so `aggregation: { compute: true }` (intervals) and
+//   `{ conditional: true }` (ordered by a measure in a member of the other axis) are tested with fakes only.
+// - A `filter` transformation after `groupby` is accepted but ignored (every group comes back), so `nonEmpty`, `find`
+//   and the orders by a measure whose groups a filter tells apart (`sum`, `avg`, `min`, `max`) cannot match memory
+//   here; ordering by `count` or `countDistinct` needs no group filter and is tested.
+// - `$orderby` on an enumeration (Gender) orders by its member numbers, not its names as memory does, so no test
+//   slices an enumeration level.
+describe('ODataAdapter on TripPin RESTier (pivot in parts)', () => {
+  const url = `https://services.odata.org/TripPinRESTierService/(S(motifjsparts${Date.now()}))/People`;
+  const people = new ODataAdapter<Row, string>({
+    url,
+    key: 'UserName',
+    locale: 'en-US',
+    aggregation: true,
+    retry: { retries: 2 },
+  });
+  const ctx = { locale: 'en-US' };
+  let all: Row[];
+
+  beforeAll(async () => {
+    all = (await people.load()).rows;
+    expect(all.length).toBeGreaterThan(10);
+  });
+
+  const shape = (r: data.PivotMembersResult) => r.slices.map((s) => ({ total: s.total, members: s.members.map((m) => ({ key: m.key, count: m.count, values: m.values, childCount: m.childCount })) }));
+  const watch = () => {
+    const requests: URLSearchParams[] = [];
+    const sub = people.onRequesting((r) => requests.push(r.query));
+    return { requests, dispose: () => sub.dispose() };
+  };
+
+  it('reads members a slice at a time in key order, paged on the service, the way memory reads them', async () => {
+    const options: data.PivotMembersOptions<Row> = {
+      levels: [{ field: 'LastName', dir: 'desc' }],
+      slices: [{ parent: [], skip: 0, take: 5 }, { parent: [], skip: 5, take: 5 }, { parent: [], skip: 15, take: 10 }],
+      measures: [{ type: 'count' }, { type: 'countDistinct', field: 'FirstName' }, { type: 'sum', field: 'Age' }],
+    };
+    const seen = watch();
+    const server = await people.loadPivotMembers(options);
+    seen.dispose();
+    expect(shape(server)).toEqual(shape(pivotMembers(all, options, ctx)));
+    expect(server.slices[0].members).toHaveLength(5);
+    expect(server.slices[0].total).toBeGreaterThan(15);
+    // Every list is a page (`$top`), never the whole level.
+    const listed = seen.requests.filter((q) => q.has('$orderby'));
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed.every((q) => Number(q.get('$top')) <= 10)).toBe(true);
+  });
+
+  it('reads the children of one parent with the counts of their own children', async () => {
+    const deeper: data.PivotMembersOptions<Row> = {
+      levels: [{ field: 'Gender' }, { field: 'LastName' }],
+      slices: [{ parent: ['Female'], skip: 2, take: 4 }],
+      measures: [{ type: 'count' }],
+    };
+    expect(shape(await people.loadPivotMembers(deeper))).toEqual(shape(pivotMembers(all, deeper, ctx)));
+    const counted: data.PivotMembersOptions<Row> = { levels: [{ field: 'LastName' }, { field: 'FirstName' }], slices: [{ parent: [], take: 4 }], childCounts: true };
+    expect(shape(await people.loadPivotMembers(counted))).toEqual(shape(pivotMembers(all, counted, ctx)));
+  });
+
+  // Only by `count` and `countDistinct`: their one group needs no filter after `groupby`, which this service ignores.
+  it('orders by a measure at the total, counted and paged on the service', async () => {
+    for (const measure of [0, 1] as const) {
+      for (const dir of ['asc', 'desc'] as const) {
+        const options: data.PivotMembersOptions<Row> = {
+          levels: [{ field: 'LastName', dir }],
+          slices: [{ parent: [], skip: 1, take: 6 }],
+          measures: [{ type: 'count' }, { type: 'countDistinct', field: 'FirstName' }],
+          sortBySummary: { measure },
+        };
+        const server = await people.loadPivotMembers(options);
+        expect(shape(server), `measure ${measure} ${dir}`).toEqual(shape(pivotMembers(all, options, ctx)));
+      }
+    }
+  });
+
+  it('counts the children of members the way memory counts them', async () => {
+    // 'Unknown' is a member of the Gender enumeration no person has; a name outside it would not parse in a filter.
+    const options: data.PivotCountsOptions<Row> = { levels: [{ field: 'Gender' }, { field: 'LastName' }], paths: [[], ['Female'], ['Male'], ['Unknown']] };
+    const server = await people.loadPivotCounts(options);
+    const memory = pivotCounts(all, options, ctx);
+    for (const path of options.paths) expect(server.childCount(path), String(path)).toBe(memory.childCount(path));
+    expect(server.childCount(['Female'])).toBeGreaterThan(0);
+  });
+
+  it('counts what stands below members a block at a time, and below the members of a part, as memory does', async () => {
+    const levels = [{ field: 'LastName' }, { field: 'FirstName' }];
+    const seen = watch();
+    for (const options of [
+      { levels, parents: [[]], size: 4, depth: 1 },
+      { levels, parents: [[]], depth: 1 },
+      { levels: [{ field: 'Gender' }, ...levels], parents: [['Female'], ['Male']], size: 3, depth: 1 },
+    ] satisfies data.PivotBlocksOptions<Row>[]) {
+      expect((await people.loadPivotBlocks(options)).blocks).toEqual(pivotBlocks(all, options, ctx).blocks);
+    }
+    seen.dispose();
+    // Two reads a parent and level, however many the children: none names them.
+    expect(seen.requests.length).toBe(2 + 2 + 4);
+    const part: data.PivotMembersOptions<Row> = { levels, slices: [{ parent: [], skip: 2, take: 5 }], descendants: 1 };
+    const server = await people.loadPivotMembers(part);
+    expect(server.slices[0].members.map((m) => [m.key, m.descendants])).toEqual(pivotMembers(all, part, ctx).slices[0].members.map((m) => [m.key, m.descendants]));
+    const paged = new ODataAdapter<Row, string>({ url, key: 'UserName', locale: 'en-US', aggregation: { pageSize: 5 }, retry: { retries: 2 } });
+    const whole: data.PivotBlocksOptions<Row> = { levels, parents: [[]], size: 4, depth: 1 };
+    expect((await paged.loadPivotBlocks(whole)).blocks).toEqual(pivotBlocks(all, whole, ctx).blocks);
+  });
+
+  it('reads the cells of the crossings asked for the way memory computes them', async () => {
+    const genders = [...new Set(all.map((r) => r.Gender))];
+    const options: data.PivotCellsOptions<Row> = {
+      rows: [{ field: 'Gender' }, { field: 'LastName' }],
+      columns: [{ field: 'FavoriteFeature' }],
+      measures: [{ type: 'count' }, { type: 'countDistinct', field: 'FirstName' }, { type: 'sum', field: 'Age' }],
+      rowPaths: [[], ...genders.map((g) => [g]), [genders[0], String(all.find((r) => r.Gender === genders[0])!.LastName)]],
+      columnPaths: [[], ['Feature1'], ['Feature2']],
+    };
+    const server = await people.loadPivotCells(options);
+    const memory = pivotCells(all, options, ctx);
+    for (const rowPath of options.rowPaths) {
+      for (const columnPath of options.columnPaths) {
+        expect(server.count(rowPath, columnPath), `${rowPath} x ${columnPath}`).toBe(memory.count(rowPath, columnPath));
+        expect(server.values(rowPath, columnPath), `${rowPath} x ${columnPath}`).toEqual(memory.values(rowPath, columnPath));
+      }
+    }
+    expect(server.count([], [])).toBe(all.length);
   });
 });
 

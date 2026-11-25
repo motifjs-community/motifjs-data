@@ -1,5 +1,6 @@
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import type { PivotBlocksOptions } from '../query/pivot-blocks-options';
 import type { PivotCellsOptions } from '../query/pivot-cells-options';
 import type { PivotCountsOptions } from '../query/pivot-counts-options';
 import type { PivotLevel } from '../query/pivot-level';
@@ -55,26 +56,42 @@ export function defaultPivotBody(options: PivotLoadOptions<any>): Record<string,
 /**
  * The body of a part of a pivot, `kind` first, the levels, measures and members kept as `defaultPivotBody` writes them:
  * `{ kind: 'members', filter, keep, levels, slices: [{ parent, skip, take }], measures, sortBySummary, childCounts, find,
- * nonEmpty }`, `{ kind: 'counts', filter, keep, levels, paths, measures, nonEmpty }` or `{ kind: 'cells', filter, keep,
- * rows, columns, measures, rowPaths, columnPaths }`, with `running: [{ measure, axis, orders }]` where running totals are
- * asked for.
+ * nonEmpty }` (with `descendants`, a number of levels, where it is asked for), `{ kind: 'counts', filter, keep, levels,
+ * paths, measures, nonEmpty }`, `{ kind: 'cells', filter, keep, rows, columns, measures, rowPaths, columnPaths }`, with
+ * `running: [{ measure, axis, orders }]` where running totals are asked for, or `{ kind: 'blocks', filter, keep, levels,
+ * parents, size, depth, measures, sortBySummary, nonEmpty }` (`size` is `null` for one block per parent).
  */
 export function defaultPivotPartBody(kind: RestPivotPart, options: RestPivotPartOptions<any>): Record<string, unknown> {
   const level = ({ field, interval, dir }: PivotLevel<any>) => ({ field, interval, dir });
   const measure = (m: PivotMeasure<any>) => ({ type: m.type, field: m.field, skipEmpty: m.type === 'custom' ? undefined : m.skipEmpty });
+  const sortOf = (sort: PivotSummarySort<any> | null | undefined) => (sort ? { measure: sort.measure, levels: (sort.levels ?? []).map(level), path: sort.path ?? [] } : null);
   const keep = (options.keep ?? []).map(({ field, intervals, paths, type, filter }) => ({ field, intervals: intervals ?? [], paths, type: type ?? 'include', filter }));
   const base = { kind, filter: options.filter ?? null, keep };
   if (kind === 'members') {
     const o = options as PivotMembersOptions<any>;
-    const sort = o.sortBySummary;
-    return {
+    const body: Record<string, unknown> = {
       ...base,
       levels: o.levels.map(level),
       slices: o.slices.map(({ parent, skip, take }) => ({ parent, skip: skip ?? 0, take })),
       measures: (o.measures ?? []).map(measure),
-      sortBySummary: sort ? { measure: sort.measure, levels: (sort.levels ?? []).map(level), path: sort.path ?? [] } : null,
+      sortBySummary: sortOf(o.sortBySummary),
       childCounts: !!o.childCounts,
       find: o.find ?? [],
+      nonEmpty: !!o.nonEmpty,
+    };
+    if (o.descendants) body.descendants = o.descendants;
+    return body;
+  }
+  if (kind === 'blocks') {
+    const o = options as PivotBlocksOptions<any>;
+    return {
+      ...base,
+      levels: o.levels.map(level),
+      parents: o.parents,
+      size: o.size ?? null,
+      depth: o.depth,
+      measures: (o.measures ?? []).map(measure),
+      sortBySummary: sortOf(o.sortBySummary),
       nonEmpty: !!o.nonEmpty,
     };
   }
@@ -85,13 +102,12 @@ export function defaultPivotPartBody(kind: RestPivotPart, options: RestPivotPart
   const o = options as PivotCellsOptions<any>;
   const cells: Record<string, unknown> = { ...base, rows: o.rows.map(level), columns: o.columns.map(level), measures: o.measures.map(measure), rowPaths: o.rowPaths, columnPaths: o.columnPaths };
   if (o.running?.length) {
-    const sortOf = (sort: PivotSummarySort<any> | null) => (sort ? { measure: sort.measure, levels: (sort.levels ?? []).map(level), path: sort.path ?? [] } : null);
     cells.running = o.running.map((r) => ({ measure: r.measure, axis: r.axis, orders: (r.orders ?? []).map(sortOf) }));
   }
   return cells;
 }
 
-/** A part's answer: the body for members (`{ slices }`) and counts (`{ counts }`); for cells the body when it is an array, or its `groups`. */
+/** A part's answer: the body for members (`{ slices }`), counts (`{ counts }`) and blocks (`{ blocks }`); for cells the body when it is an array, or its `groups`. */
 export function defaultReadPivotPart(kind: RestPivotPart, body: unknown): unknown {
   return kind === 'cells' ? defaultReadPivot(body) : body;
 }

@@ -228,3 +228,115 @@ describe('SoapAdapter', () => {
     await expect(adapter.remove(3)).rejects.toMatchObject({ plainMessage: 'Not saved' });
   });
 });
+
+describe('SoapAdapter pivots', () => {
+  type Sale = { Id: number; Region: string | null; City: string | null; Amount: number | null };
+  const sales: Sale[] = [
+    { Id: 1, Region: 'North', City: 'Oslo', Amount: 100 },
+    { Id: 2, Region: 'North', City: 'Bergen', Amount: 50 },
+    { Id: 3, Region: 'South', City: 'Rome', Amount: null },
+    { Id: 4, Region: 'South', City: 'Milan', Amount: 30 },
+    { Id: 5, Region: null, City: 'Nowhere', Amount: 20 },
+  ];
+  const ctx: data.EvaluateContext = { locale: 'tr', fields: { Id: 'number', Amount: 'number' } };
+  const field = (name: string, value: unknown) => (value === null ? `<a:${name} i:nil="true"/>` : `<a:${name}>${String(value)}</a:${name}>`);
+  const salesXml = sales.map((s) => `<a:Sale>${field('Id', s.Id)}${field('Region', s.Region)}${field('City', s.City)}${field('Amount', s.Amount)}</a:Sale>`).join('');
+
+  /** Answers the pivot operation with the memory engine over `sales`, and the load operation with the rows. */
+  const pivotService = () =>
+    fakeService((call) => {
+      if (call.body.includes('GetAllSales')) return xml(result('GetAllSales', salesXml));
+      const doc = new DOMParser().parseFromString(call.body, 'text/xml');
+      const op = doc.getElementsByTagName('Pivot')[0];
+      // A call with its own args carries no kind: its own read ignores the answer.
+      if (!op.getElementsByTagName('kind').length) return xml(result('Pivot', ''));
+      const kind = op.getElementsByTagName('kind')[0].textContent;
+      const body = JSON.parse(op.getElementsByTagName('body')[0].textContent!) as Record<string, unknown>;
+      const answer =
+        kind === 'whole'
+          ? data.pivotGroups(sales, body as unknown as data.PivotLoadOptions<Sale>, ctx)
+          : kind === 'members'
+            ? data.pivotMembers(sales, body as unknown as data.PivotMembersOptions<Sale>, ctx)
+            : kind === 'counts'
+              ? { counts: (body.paths as unknown[][]).map((path) => ({ path, count: data.pivotCounts(sales, body as unknown as data.PivotCountsOptions<Sale>, ctx).childCount(path) })) }
+              : kind === 'cells'
+                ? data.pivotCellGroups(sales, body as unknown as data.PivotCellsOptions<Sale>, ctx)
+                : data.pivotBlocks(sales, body as unknown as data.PivotBlocksOptions<Sale>, ctx);
+      return xml(result('Pivot', JSON.stringify(answer)));
+    });
+
+  const makePivot = (service: ReturnType<typeof fakeService>, pivot: Partial<data.SoapPivotOperation<Sale>> = {}) =>
+    new data.SoapAdapter<Sale, number>({
+      url: 'https://host/SalesService.svc',
+      key: 'Id',
+      locale: 'tr',
+      fields: { Id: 'number', Amount: 'number' },
+      fetch: service.fetch,
+      contract: 'ISalesService',
+      operations: { load: { name: 'GetAllSales' }, pivot: { name: 'Pivot', ...pivot } },
+    });
+
+  it('computes a whole pivot through the operation, the REST body as JSON text', async () => {
+    const service = pivotService();
+    const adapter = makePivot(service);
+    expect([adapter.capabilities.pivot, adapter.capabilities.pivotWindow, adapter.capabilities.pivotBlocks]).toEqual([true, true, false]);
+    const options: data.PivotLoadOptions<Sale> = { rows: [{ field: 'Region' }, { field: 'City' }], measures: [{ type: 'sum', field: 'Amount' }, { type: 'count' }], expandedRows: [['North']] };
+    const p = await adapter.loadPivot(options);
+    const memory = data.queryPivot(sales, options, ctx);
+    const shape = (r: data.PivotLoadResult) =>
+      [r.rows, ...r.rows.children!.flatMap((m) => [m, ...(m.children ?? [])])].map((m) => [m.path, m.count, r.values(m, r.columns)]);
+    expect(shape(p)).toEqual(shape(memory));
+    const call = service.calls[0];
+    expect(call.headers.get('soapaction')).toBe('"http://tempuri.org/ISalesService/Pivot"');
+    expect(call.body).toContain('<kind>whole</kind><body>{&quot;filter&quot;:null');
+  });
+
+  it('answers each part the way memory computes it: members with descendants, counts, cells and blocks', async () => {
+    const adapter = makePivot(pivotService(), { blocks: true });
+    expect(adapter.capabilities.pivotBlocks).toBe(true);
+    const levels: data.PivotLevel<Sale>[] = [{ field: 'Region' }, { field: 'City' }];
+    const sum = { type: 'sum', field: 'Amount' } as const;
+
+    const members: data.PivotMembersOptions<Sale> = { levels, slices: [{ parent: [], skip: 1, take: 2 }], measures: [sum], childCounts: true, descendants: 1 };
+    const m = await adapter.loadPivotMembers(members);
+    const mm = data.pivotMembers(sales, members, ctx);
+    expect(m.slices[0].total).toBe(mm.slices[0].total);
+    expect(m.slices[0].members.map((x) => [x.key, x.count, x.values, x.childCount, x.descendants])).toEqual(mm.slices[0].members.map((x) => [x.key, x.count, x.values, x.childCount, x.descendants]));
+
+    const counts: data.PivotCountsOptions<Sale> = { levels, paths: [[], ['North'], [null]] };
+    const c = await adapter.loadPivotCounts(counts);
+    const mc = data.pivotCounts(sales, counts, ctx);
+    for (const path of counts.paths) expect(c.childCount(path)).toBe(mc.childCount(path));
+
+    const cells: data.PivotCellsOptions<Sale> = { rows: levels, columns: [], measures: [sum, { type: 'count' }], rowPaths: [[], ['North'], [null]], columnPaths: [[]] };
+    const v = await adapter.loadPivotCells(cells);
+    const mv = data.pivotCells(sales, cells, ctx);
+    for (const path of cells.rowPaths) {
+      expect(v.count(path, [])).toBe(mv.count(path, []));
+      expect(v.values(path, [])).toEqual(mv.values(path, []));
+    }
+
+    const blocks: data.PivotBlocksOptions<Sale> = { levels, parents: [[]], size: 2, depth: 1 };
+    expect((await adapter.loadPivotBlocks(blocks)).blocks).toEqual(data.pivotBlocks(sales, blocks, ctx).blocks);
+  });
+
+  it('keeps blocks in memory without blocks: true, loads whole pivots only with window: false, and takes its own args and read', async () => {
+    const service = pivotService();
+    const noBlocks = makePivot(service);
+    expect(noBlocks.capabilities.pivotBlocks).toBe(false);
+    const options: data.PivotBlocksOptions<Sale> = { levels: [{ field: 'Region' }], parents: [[]], depth: 0 };
+    expect((await noBlocks.loadPivotBlocks(options)).blocks).toEqual(data.pivotBlocks(sales, options, ctx).blocks);
+    expect(service.calls.at(-1)!.body).toContain('GetAllSales');
+
+    const wholeOnly = makePivot(service, { window: false, blocks: true });
+    expect([wholeOnly.capabilities.pivot, wholeOnly.capabilities.pivotWindow, wholeOnly.capabilities.pivotBlocks]).toEqual([true, false, false]);
+
+    const own = makePivot(service, {
+      args: (kind, o) => ({ query: `${kind}:${(o as data.PivotLoadOptions<Sale>).rows?.length ?? 0}` }),
+      read: (kind) => (kind === 'whole' ? [{ rows: ['North'], columns: [], count: 2, values: [] }] : []),
+    });
+    const p = await own.loadPivot({ rows: [{ field: 'Region' }] });
+    expect(service.calls.at(-1)!.body).toContain('<query>whole:1</query>');
+    expect(p.rows.children!.map((x) => [x.key, x.count])).toEqual([['North', 2]]);
+  });
+});

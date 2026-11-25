@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { data } from '../src';
-const { allEmpty, ArrayAdapter, pivotCells, pivotCounts, pivotMembers, queryPivot, where } = data;
+const { allEmpty, ArrayAdapter, pivotBlocks, pivotCells, pivotCounts, pivotMembers, queryPivot, where } = data;
 
 type Sale = { id: number; region: string | null; city: string; day: string; amount: number | null; units: number; rating: number | null };
 
@@ -64,6 +64,22 @@ describe('pivot windows in memory', () => {
     const bySum = pivotMembers(sales, { levels: [region, { ...city, dir: 'desc' }], slices: [{ parent: ['South'], take: 0 }], measures: [sum], sortBySummary: { measure: 0 }, find }, ctx);
     // South: Rome 30, Milan 10, desc; North: Oslo 100, Bergen 50.
     expect(bySum.found).toEqual([0, 0, -1, 0]);
+  });
+
+  it('gives the children and the places of thousands of members at once', () => {
+    const parents = Array.from({ length: 6000 }, (_, i) => [['North', 'South'][i % 2], `City ${String(i).padStart(4, '0')}`]);
+    const rows = parents.flatMap(([region, city], i) => [
+      { region, city, day: '2023-05-05', amount: i },
+      { region, city, day: '2024-05-05', amount: 1 },
+    ]);
+    const started = performance.now();
+    const r = pivotMembers(rows, { levels: [region, city, year], slices: parents.map((parent) => ({ parent })), measures: [sum], find: parents.map((parent) => [...parent, 2024]) }, ctx);
+    expect(r.slices.map((s) => s.members.map((m) => [m.key, m.values[0]]))).toEqual(parents.map((_, i) => [[2023, i], [2024, 1]]));
+    expect(r.found).toEqual(parents.map(() => 1));
+    const places = pivotMembers(rows, { levels: [region, { ...city, dir: 'desc' }], slices: [{ parent: ['South'], take: 0 }], find: parents }, ctx);
+    expect(places.found).toEqual(parents.map((_, i) => 2999 - Math.floor(i / 2)));
+    // Each is looked up, not searched for among its siblings.
+    expect(performance.now() - started).toBeLessThan(4000);
   });
 
   it('counts the children of members on any level', () => {
@@ -204,7 +220,7 @@ class Server extends ArrayAdapter<Sale, number> {
     super({ data: sales, key: 'id', fields: { day: 'date' }, locale: 'en-US' });
   }
   protected override backendCapabilities(): data.Capabilities {
-    return { ...super.backendCapabilities(), pivot: true, pivotWindow: true };
+    return { ...super.backendCapabilities(), pivot: true, pivotWindow: true, pivotBlocks: true };
   }
   protected override async loadPivotMemberSlices(o: data.PivotMembersOptions<Sale>): Promise<unknown> {
     this.asked.push('members');
@@ -220,7 +236,109 @@ class Server extends ArrayAdapter<Sale, number> {
     const r = pivotCells(sales, o, this.evaluateContext);
     return JSON.parse(JSON.stringify(o.rowPaths.flatMap((rows) => o.columnPaths.map((columns) => ({ rows, columns, count: r.count(rows, columns), values: r.values(rows, columns) ?? [] })))));
   }
+  protected override async loadPivotBlockCounts(o: data.PivotBlocksOptions<Sale>): Promise<unknown> {
+    this.asked.push('blocks');
+    return JSON.parse(JSON.stringify(pivotBlocks(sales, o, this.evaluateContext)));
+  }
 }
+
+describe('pivot blocks', () => {
+  // Regions in order: East (Kyiv: 2024), North (Bergen: 2024, Oslo: 2023), South (Milan: 2023, Rome: 2024), the empty
+  // one (Nowhere: 2023).
+  it('counts the children of parents a block at a time, and the members below them, in the order of pivotMembers', () => {
+    const r = pivotBlocks(sales, { levels: [region, city, year], parents: [[]], size: 2, depth: 2 }, ctx);
+    expect(r.blocks).toEqual([
+      { parent: [], total: 4, counts: [[2, 3, 3], [2, 3, 3]] },
+    ]);
+    // Without a size, one block; deeper than the axis, zeros.
+    const whole = pivotBlocks(sales, { levels: [region, city, year], parents: [['South'], ['north'], ['West']], depth: 3 }, ctx);
+    expect(whole.blocks.map((b) => [b.parent, b.total, b.counts])).toEqual([
+      [['South'], 2, [[2, 2, 0, 0]]],
+      [['north'], 2, [[2, 2, 0, 0]]],
+      [['West'], 0, []],
+    ]);
+    // The same order as the members, block by block.
+    const desc = { ...region, dir: 'desc' as const };
+    const blocks = pivotBlocks(sales, { levels: [desc, city], parents: [[]], size: 1, depth: 1 }, ctx);
+    const members = pivotMembers(sales, { levels: [desc, city], slices: [{ parent: [] }], descendants: 1 }, ctx);
+    expect(blocks.blocks[0].counts).toEqual(members.slices[0].members.map((m) => [1, ...m.descendants!]));
+    expect(members.slices[0].members.map((m) => [m.key, m.descendants])).toEqual([
+      ['South', [2]],
+      ['North', [2]],
+      ['East', [1]],
+      [null, [1]],
+    ]);
+  });
+
+  it('orders the children by a measure and leaves out empty members on every level, as the members do', () => {
+    const avg = { type: 'avg', field: 'rating' } as const;
+    // Ratings: Oslo 4 (North), Milan 3 (South); every other city has none.
+    const r = pivotBlocks(sales, { levels: [region, city, year], parents: [[]], size: 1, depth: 2, measures: [avg], nonEmpty: true }, ctx);
+    expect(r.blocks[0]).toEqual({ parent: [], total: 2, counts: [[1, 1, 1], [1, 1, 1]] });
+    const bySum = { levels: [region, city], measures: [sum], sortBySummary: { measure: 0 } };
+    const blocks = pivotBlocks(sales, { ...bySum, parents: [[]], size: 3, depth: 1 }, ctx);
+    const members = pivotMembers(sales, { ...bySum, slices: [{ parent: [] }], descendants: 1 }, ctx);
+    const own = members.slices[0].members.map((m) => m.descendants![0]);
+    expect(blocks.blocks[0].counts).toEqual([
+      [3, own[0] + own[1] + own[2]],
+      [1, own[3]],
+    ]);
+  });
+
+  it('runs on adapters: in memory where the backend does not count them, read from a backend that does, options checked', async () => {
+    const a = new ArrayAdapter<Sale, number>({ data: sales, key: 'id', fields: { day: 'date' }, locale: 'en-US' });
+    const options: data.PivotBlocksOptions<Sale> = { levels: [region, city], parents: [[]], size: 2, depth: 1 };
+    expect((await a.loadPivotBlocks(options)).blocks).toEqual(pivotBlocks(sales, options, ctx).blocks);
+    const server = new Server();
+    const read = await server.loadPivotBlocks({ ...options, parents: [['north'], ['South']], depth: 3 });
+    expect(read.blocks.map((b) => [b.parent, b.total, b.counts])).toEqual([
+      [['north'], 2, [[2, 0, 0, 0]]],
+      [['South'], 2, [[2, 0, 0, 0]]],
+    ]);
+    const members = await server.loadPivotMembers({ levels: [region, city, year], slices: [{ parent: [], take: 2 }], descendants: 2 });
+    expect(members.slices[0].members.map((m) => m.descendants)).toEqual([
+      [1, 1],
+      [2, 2],
+    ]);
+    expect(server.asked).toEqual(['blocks', 'members']);
+    const bad: unknown[] = [
+      { levels: [], parents: [[]], depth: 0 },
+      { levels: [region], parents: [], depth: 0 },
+      { levels: [region], parents: [['North']], depth: 0 },
+      { levels: [region, city], parents: [[], ['North']], depth: 0 },
+      { levels: [region], parents: [[]], size: 0, depth: 0 },
+      { levels: [region], parents: [[]], depth: -1 },
+      { levels: [region], parents: [[]], depth: 0, measures: [sum], sortBySummary: { measure: 2 } },
+    ];
+    for (const o of bad) await expect(a.loadPivotBlocks(o as data.PivotBlocksOptions<Sale>)).rejects.toMatchObject({ code: 'MJD302' });
+    await expect(a.loadPivotMembers({ levels: [region], slices: [{ parent: [] }], descendants: -1 })).rejects.toMatchObject({ code: 'MJD302' });
+  });
+
+  it('works blocks and descendants out in memory where a backend reads parts but does not count blocks', async () => {
+    class Older extends Server {
+      protected override backendCapabilities(): data.Capabilities {
+        return { ...super.backendCapabilities(), pivotBlocks: false };
+      }
+    }
+    const older = new Older();
+    const options: data.PivotBlocksOptions<Sale> = { levels: [region, city], parents: [[]], size: 2, depth: 1 };
+    expect((await older.loadPivotBlocks(options)).blocks).toEqual(pivotBlocks(sales, options, ctx).blocks);
+    const members = await older.loadPivotMembers({ levels: [region, city], slices: [{ parent: [], take: 1 }], descendants: 1 });
+    expect(members.slices[0].members.map((m) => m.descendants)).toEqual([[1]]);
+    // Without descendants the members still come from the backend.
+    await older.loadPivotMembers({ levels: [region], slices: [{ parent: [] }] });
+    expect(older.asked).toEqual(['members']);
+  });
+
+  it('fails with a blocks answer that is none', async () => {
+    class Broken extends Server {
+      protected override async loadPivotBlockCounts(): Promise<unknown> {
+        return { blocks: [{ total: 1, counts: 3 }] };
+      }
+    }
+    await expect(new Broken().loadPivotBlocks({ levels: [region], parents: [[]], depth: 0 })).rejects.toMatchObject({ code: 'MJD104' });
+  });
+});
 
 describe('pivot windows on adapters', () => {
   it('groups in memory where the backend does not compute them, and checks the options', async () => {

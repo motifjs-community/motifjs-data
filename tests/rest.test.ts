@@ -310,6 +310,55 @@ describe('RestAdapter pivots', () => {
     expect(make(api, { pivot: { url: '/api/orders/pivot', window: false } }).capabilities.pivotWindow).toBe(false);
   });
 
+  it('asks the endpoint for blocks and members descendants with blocks: true, bodies marked and answers as memory gives them', async () => {
+    const rows = orders(5);
+    const api = fakeApi(rows);
+    api.answer((call) => {
+      if (call.url.pathname !== '/api/orders/pivot') return undefined;
+      const body = call.body as { kind: string };
+      if (body.kind === 'blocks') return json(JSON.parse(JSON.stringify(data.pivotBlocks(rows, body as unknown as data.PivotBlocksOptions<Order>))));
+      return json(JSON.parse(JSON.stringify(data.pivotMembers(rows, body as unknown as data.PivotMembersOptions<Order>))));
+    });
+    const adapter = make(api, { pivot: { url: '/api/orders/pivot', blocks: true } });
+    expect(adapter.capabilities.pivotBlocks).toBe(true);
+    const options: data.PivotBlocksOptions<Order> = { levels: [{ field: 'customer' }, { field: 'id' }], parents: [[]], size: 3, depth: 1, measures: [{ type: 'sum', field: 'amount' }], nonEmpty: true };
+    const r = await adapter.loadPivotBlocks(options);
+    expect(api.calls[0].body).toEqual({
+      kind: 'blocks',
+      filter: null,
+      keep: [],
+      levels: [{ field: 'customer' }, { field: 'id' }],
+      parents: [[]],
+      size: 3,
+      depth: 1,
+      measures: [{ type: 'sum', field: 'amount' }],
+      sortBySummary: null,
+      nonEmpty: true,
+    });
+    expect(r.blocks).toEqual(data.pivotBlocks(rows, options).blocks);
+    // The members body carries descendants only when they are asked for, and each member of the answer has them.
+    const members: data.PivotMembersOptions<Order> = { levels: [{ field: 'customer' }, { field: 'id' }], slices: [{ parent: [], take: 2 }], descendants: 2 };
+    const m = await adapter.loadPivotMembers(members);
+    expect((api.calls[1].body as { descendants?: number }).descendants).toBe(2);
+    expect(m.slices[0].members.map((x) => [x.key, x.descendants])).toEqual(data.pivotMembers(rows, members).slices[0].members.map((x) => [x.key, x.descendants]));
+    await adapter.loadPivotMembers({ ...members, descendants: undefined });
+    expect('descendants' in (api.calls[2].body as object)).toBe(false);
+  });
+
+  it('counts blocks and descendants in memory when the endpoint does not opt in', async () => {
+    const rows = orders(5);
+    const api = fakeApi(rows);
+    const adapter = make(api, { pivot: { url: '/api/orders/pivot' } });
+    expect(adapter.capabilities.pivotBlocks).toBe(false);
+    const options: data.PivotBlocksOptions<Order> = { levels: [{ field: 'customer' }], parents: [[]], depth: 0 };
+    const r = await adapter.loadPivotBlocks(options);
+    expect(api.calls.map((c) => c.url.pathname)).toEqual(['/api/orders']);
+    expect(r.blocks).toEqual(data.pivotBlocks(rows, options).blocks);
+    // Members with descendants load the rows too: the endpoint does not know them.
+    await adapter.loadPivotMembers({ levels: [{ field: 'customer' }, { field: 'id' }], slices: [{ parent: [] }], descendants: 1 });
+    expect(api.calls[1].url.pathname).toBe('/api/orders');
+  });
+
   it('writes and reads the endpoint its own way, and groups in memory without one', async () => {
     const api = fakeApi(orders(4));
     api.answer((call) => (call.url.pathname === '/api/pivot' ? json([{ rows: [], columns: [], count: 4, values: [] }]) : undefined));

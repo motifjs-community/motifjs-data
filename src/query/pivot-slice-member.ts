@@ -9,4 +9,6 @@ export interface PivotSliceMember {
   values: readonly unknown[];
   /** The number of the member's children on the next level, with `childCounts`. */
   childCount?: number;
+  /** The number of members below it on each level down, as many as `descendants` asked for: its children first. */
+  descendants?: readonly number[];
 }

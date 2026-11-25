@@ -11,6 +11,12 @@ export interface Capabilities {
   pivot?: boolean;
   /** The parts of a pivot a view loads as it scrolls (`loadPivotMembers`, `loadPivotCounts`, `loadPivotCells`); missing means no. */
   pivotWindow?: boolean;
+  /**
+   * With `pivotWindow`, the counts that place members open by default without reading every one (`loadPivotBlocks`, and
+   * `descendants` of `loadPivotMembers`); missing means no: they are worked out in memory, and a view reads such members
+   * whole as it did before.
+   */
+  pivotBlocks?: boolean;
   insert: boolean;
   update: boolean;
   remove: boolean;

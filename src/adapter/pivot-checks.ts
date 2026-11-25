@@ -1,5 +1,6 @@
 import { validateFilter } from '../query/filter-validation';
 import { isPivotInterval } from '../query/pivot';
+import type { PivotBlocksOptions } from '../query/pivot-blocks-options';
 import type { PivotCellsOptions } from '../query/pivot-cells-options';
 import type { PivotCountsOptions } from '../query/pivot-counts-options';
 import type { PivotKeep } from '../query/pivot-keep';
@@ -51,6 +52,26 @@ export function checkMembersOptions<T>(o: PivotMembersOptions<T>, invalid: Inval
     if (!Array.isArray(o.find) || !o.find.every((path) => Array.isArray(path) && path.length === depth)) throw invalid(`find are members of the level asked for, ${depth} keys each`);
     out.find = o.find.map((path) => [...path]);
   }
+  if (o.descendants !== undefined && !isCount(o.descendants)) throw invalid('descendants is a number of levels, 0 or more');
+  checkNonEmpty(o, invalid);
+  if (o.expand) out.expand = [...o.expand];
+  return out;
+}
+
+/** The options of `loadPivotBlocks`, checked. */
+export function checkBlocksOptions<T>(o: PivotBlocksOptions<T>, invalid: Invalid): PivotBlocksOptions<T> {
+  const out: PivotBlocksOptions<T> = { ...o };
+  checkFilter(o, out, invalid);
+  out.levels = checkLevels(o.levels, 'levels', invalid);
+  if (!out.levels.length) throw invalid('levels needs at least one level');
+  out.parents = checkPaths(o.parents, 'parents', out.levels.length - 1, invalid);
+  if (!out.parents.length) throw invalid('parents needs at least one member');
+  if (out.parents.some((p) => p.length !== out.parents[0].length)) throw invalid('every parent stands on the same level');
+  if (o.size !== undefined && !(isCount(o.size) && o.size > 0)) throw invalid('size is a number of children, 1 or more');
+  if (!isCount(o.depth)) throw invalid('depth is a number of levels, 0 or more');
+  if (o.keep) out.keep = checkKeep(o.keep, invalid);
+  if (o.measures) out.measures = checkMeasures(o.measures, invalid);
+  if (o.sortBySummary) out.sortBySummary = checkSummarySort(o.sortBySummary, 'sortBySummary', out.measures?.length ?? 0, invalid);
   checkNonEmpty(o, invalid);
   if (o.expand) out.expand = [...o.expand];
   return out;

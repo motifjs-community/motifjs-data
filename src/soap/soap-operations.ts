@@ -2,9 +2,12 @@ import type { BatchResult } from '../adapter/batch-result';
 import type { Change } from '../adapter/change';
 import type { SoapLoadOperation } from './soap-load-operation';
 import type { SoapOperation } from './soap-operation';
+import type { SoapPivotOperation } from './soap-pivot-operation';
 
 export interface SoapOperations<T, K> {
   load: SoapLoadOperation<T>;
+  /** Computes pivots, whole and in parts (`capabilities.pivot`, `pivotWindow`); without it they are grouped in memory. */
+  pivot?: SoapPivotOperation<T>;
   /** Without it, the row is looked for among the loaded rows. */
   byKey?: SoapOperation<[key: K], T | undefined>;
   /** Default read: the saved row, or the new key when the operation returns only that. */

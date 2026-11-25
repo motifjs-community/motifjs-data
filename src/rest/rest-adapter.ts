@@ -8,6 +8,7 @@ import { HttpAdapter } from '../http/http-adapter';
 import { requestParams } from '../http/request-params';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import type { PivotBlocksOptions } from '../query/pivot-blocks-options';
 import type { PivotCellsOptions } from '../query/pivot-cells-options';
 import type { PivotCountsOptions } from '../query/pivot-counts-options';
 import type { PivotLoadOptions } from '../query/pivot-load-options';
@@ -32,7 +33,8 @@ export class RestAdapter<T = Record<string, unknown>, K = unknown> extends HttpA
 
   protected backendCapabilities(): Capabilities {
     const pivot = !!this.rest.pivot;
-    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary: false, pivot, pivotWindow: pivot && this.rest.pivot!.window !== false, insert: true, update: true, remove: true };
+    const pivotWindow = pivot && this.rest.pivot!.window !== false;
+    return { filter: true, sort: true, paging: true, count: true, select: true, group: false, summary: false, pivot, pivotWindow, pivotBlocks: pivotWindow && !!this.rest.pivot!.blocks, insert: true, update: true, remove: true };
   }
 
   protected async loadRows(options: LoadOptions): Promise<LoadResult<T>> {
@@ -62,6 +64,10 @@ export class RestAdapter<T = Record<string, unknown>, K = unknown> extends HttpA
 
   protected override loadPivotCellGroups(options: PivotCellsOptions<T>): Promise<unknown> {
     return this.loadPivotPart('cells', options);
+  }
+
+  protected override loadPivotBlockCounts(options: PivotBlocksOptions<T>): Promise<unknown> {
+    return this.loadPivotPart('blocks', options);
   }
 
   // A part of a pivot from the pivot endpoint, its body marked with `kind`.

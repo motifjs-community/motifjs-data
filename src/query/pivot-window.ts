@@ -1,6 +1,8 @@
 import type { EvaluateContext } from './evaluate-context';
 import type { FieldType } from './field-type';
 import { allEmpty, keeper, mayBeEmpty, measureRule, PivotAxis, pivotGroups, pivotResult, readKey, readValue } from './pivot';
+import type { PivotBlocksOptions } from './pivot-blocks-options';
+import type { PivotBlocksResult } from './pivot-blocks-result';
 import type { PivotCellsOptions } from './pivot-cells-options';
 import type { PivotCellsResult } from './pivot-cells-result';
 import type { PivotCountsOptions } from './pivot-counts-options';
@@ -22,59 +24,189 @@ import { runningAsks, runningTotals } from './pivot-running';
  */
 export function pivotMembers<T>(rows: readonly T[], options: PivotMembersOptions<T>, ctx: EvaluateContext = {}): PivotMembersResult {
   const depth = options.slices[0]?.parent.length ?? 0;
-  const levels = options.levels.slice(0, Math.min(depth + 1, options.levels.length));
-  const upper = new PivotAxis<T>(options.levels.slice(0, depth), ctx);
   const find = options.find ?? [];
-  const parents = trieOf([...options.slices.map((slice) => slice.parent), ...find.map((path) => path.slice(0, depth))], upper).root;
-  const sort = options.sortBySummary;
-  const path = sort?.path ?? [];
-  const columns = (sort?.levels ?? []).slice(0, path.length);
-  const slots: number[] = [];
-  const under = depth ? rows.filter((row) => hits(row, upper, parents, slots) > 0) : rows;
-  const query = { filter: options.filter, keep: options.keep, rows: levels, columns, measures: options.measures, expandedRows: true as const, expandedColumns: prefixes([path]) };
-  const result = pivotResult(pivotGroups(under, query, ctx), query, ctx);
-  const below = options.childCounts && depth + 1 < options.levels.length ? counted(under, options.levels.slice(0, depth + 2), true, options, ctx) : null;
-  const axis = new PivotAxis<T>(levels, ctx);
-  const total = result.columns;
-  const at = memberAt(result.columns, path, new PivotAxis<T>(columns, ctx));
-  const dir = options.levels[depth]?.dir;
+  const below = levelsBelow(options.levels, depth, options.descendants ?? 0);
+  const ordered = inOrder(rows, options, [...options.slices.map((slice) => slice.parent), ...find.map((path) => path.slice(0, depth))], below, ctx);
+  const counts = options.childCounts && depth + 1 < options.levels.length ? counted(ordered.under, options.levels.slice(0, depth + 2), true, options, ctx) : null;
   const measures = options.measures ?? [];
-  const nonEmpty = !!options.nonEmpty && mayBeEmpty(measures);
-  const known = new Map<string, readonly PivotMember[]>();
-  const childrenOf = (path: readonly unknown[]) => {
-    const id = upper.idOf(path);
-    let children = known.get(id);
-    if (!children) {
-      children = memberAt(result.rows, path, axis)?.children ?? [];
-      if (nonEmpty) children = children.filter((m) => !allEmpty(result.values(m, total) ?? []));
-      if (sort) children = bySummary(children, (m) => (at ? result.values(m, at)?.[sort.measure] : undefined), dir);
-      known.set(id, children);
-    }
-    return children;
-  };
   const out: PivotMembersResult = {
     slices: options.slices.map((slice) => {
-      const children = childrenOf(slice.parent);
+      const children = ordered.childrenOf(slice.parent);
       const skip = Math.max(0, slice.skip ?? 0);
       const part = slice.take === undefined ? children.slice(skip) : children.slice(skip, skip + Math.max(0, slice.take));
       return {
         parent: slice.parent,
         total: children.length,
         members: part.map((m) => {
-          const one: PivotSliceMember = { key: m.key, path: [...slice.parent, m.key], count: m.count, values: result.values(m, total) ?? measures.map(() => null) };
-          if (options.childCounts) one.childCount = below?.childCount(one.path) ?? 0;
+          const one: PivotSliceMember = { key: m.key, path: [...slice.parent, m.key], count: m.count, values: ordered.values(m) ?? measures.map(() => null) };
+          if (options.childCounts) one.childCount = counts?.childCount(one.path) ?? 0;
+          if (options.descendants) one.descendants = padded(ordered.descendants(m), options.descendants);
           return one;
         }),
       };
     }),
   };
   if (find.length) {
-    out.found = find.map((path) => {
-      const id = axis.idOf(path);
-      return childrenOf(path.slice(0, depth)).findIndex((child) => axis.idOf(child.path) === id);
-    });
+    out.found = find.map((path) => ordered.placeOf(path));
   }
   return out;
+}
+
+/**
+ * The blocks `loadPivotBlocks` asks for, over rows in memory: each parent's children in the order `pivotMembers` gives
+ * them, taken `size` at a time, each block with the number of its children and of the members below them on each level.
+ */
+export function pivotBlocks<T>(rows: readonly T[], options: PivotBlocksOptions<T>, ctx: EvaluateContext = {}): PivotBlocksResult {
+  const depth = options.parents[0]?.length ?? 0;
+  const below = levelsBelow(options.levels, depth, options.depth);
+  // The measures are there for the order and for the members left out; without these they are not worked out.
+  const measures = options.sortBySummary || options.nonEmpty ? options.measures : undefined;
+  const ordered = inOrder(rows, { ...options, measures }, options.parents, below, ctx);
+  return {
+    blocks: options.parents.map((parent) => {
+      const children = ordered.childrenOf(parent);
+      const size = options.size ?? Math.max(1, children.length);
+      const counts: number[][] = [];
+      for (let from = 0; from < children.length; from += size) {
+        const block = children.slice(from, from + size);
+        const sums = new Array<number>(options.depth + 1).fill(0);
+        sums[0] = block.length;
+        for (const child of block) ordered.descendants(child).forEach((n, j) => (sums[j + 1] += n));
+        counts.push(sums);
+      }
+      return { parent, total: children.length, counts };
+    }),
+  };
+}
+
+/** A member while members are counted: its children, by the comparable values of their keys; the last level's alone. */
+interface Tally {
+  children: Map<unknown, Tally>;
+  last: Set<unknown> | null;
+}
+
+/**
+ * The members of the rows `filter` passes and `keep` keeps, counted on every level and not grouped: how many stand below
+ * a member of a path, on each of `below` levels, its children first.
+ */
+function tallied<T>(rows: readonly T[], levels: readonly PivotLevel<T>[], options: Pick<PivotMembersOptions<T>, 'filter' | 'keep'>, ctx: EvaluateContext): (path: readonly unknown[], below: number) => number[] {
+  const pass = options.filter ? createRowFilter<T>(options.filter, ctx) : null;
+  const keepers = (options.keep ?? []).map((keep) => keeper(keep, ctx));
+  const axis = new PivotAxis<T>(levels, ctx);
+  const last = levels.length - 1;
+  const make = (): Tally => ({ children: new Map(), last: null });
+  const root = make();
+  for (const row of rows) {
+    if (pass && !pass(row)) continue;
+    if (keepers.length && !keepers.every((kept) => kept(row))) continue;
+    let node = root;
+    for (let i = 0; i < last; i++) {
+      const c = axis.comparableOf(row, i);
+      let next = node.children.get(c);
+      if (!next) node.children.set(c, (next = make()));
+      node = next;
+    }
+    (node.last ??= new Set()).add(axis.comparableOf(row, last));
+  }
+  return (path, below) => {
+    const out = new Array<number>(below).fill(0);
+    let node: Tally | undefined = root;
+    for (let i = 0; i < path.length && node; i++) node = node.children.get(axis.keyComparable(i, path[i]));
+    const add = (at: Tally, j: number) => {
+      out[j] += at.last ? at.last.size : at.children.size;
+      if (j + 1 < below) for (const child of at.children.values()) add(child, j + 1);
+    };
+    if (node && below) add(node, 0);
+    return out;
+  };
+}
+
+/** The levels below a level's members that a count can reach: as many as asked, as many as the axis has. */
+function levelsBelow(levels: readonly unknown[], depth: number, asked: number): number {
+  return Math.max(0, Math.min(asked, levels.length - depth - 1));
+}
+
+/** Numbers filled up with zeros to `length`: levels the axis does not have count no member. */
+function padded(numbers: readonly number[], length: number): number[] {
+  return Array.from({ length }, (_, j) => numbers[j] ?? 0);
+}
+
+/**
+ * The children of members of one level, ordered as `loadPivotMembers` orders them (the level's `dir`, or
+ * `sortBySummary`), without those `nonEmpty` leaves out, and the members below each, `below` levels down.
+ */
+function inOrder<T>(
+  rows: readonly T[],
+  options: Pick<PivotMembersOptions<T>, 'filter' | 'keep' | 'levels' | 'measures' | 'sortBySummary' | 'nonEmpty'>,
+  parents: readonly (readonly unknown[])[],
+  below: number,
+  ctx: EvaluateContext,
+) {
+  const depth = parents[0]?.length ?? 0;
+  const levels = options.levels.slice(0, Math.min(depth + 1, options.levels.length));
+  const upper = new PivotAxis<T>(options.levels.slice(0, depth), ctx);
+  const tree = trieOf(parents, upper).root;
+  const sort = options.sortBySummary;
+  const path = sort?.path ?? [];
+  const columns = (sort?.levels ?? []).slice(0, path.length);
+  const slots: number[] = [];
+  const under = depth ? rows.filter((row) => hits(row, upper, tree, slots) > 0) : rows;
+  const nonEmpty = !!options.nonEmpty && mayBeEmpty(options.measures ?? []);
+  // The members below are grouped only where their measures tell which are shown; else their number is enough.
+  const deeper = options.levels.slice(0, Math.min(depth + 1 + below, options.levels.length));
+  const tally = below && !nonEmpty ? tallied(under, deeper, options, ctx) : null;
+  const grouped = tally ? levels : deeper;
+  const query = { filter: options.filter, keep: options.keep, rows: grouped, columns, measures: options.measures, expandedRows: true as const, expandedColumns: prefixes([path]) };
+  const result = pivotResult(pivotGroups(under, query, ctx), query, ctx);
+  const axis = new PivotAxis<T>(levels, ctx);
+  const total = result.columns;
+  const at = memberAt(result.columns, path, new PivotAxis<T>(columns, ctx));
+  const dir = options.levels[depth]?.dir;
+  const shown = (m: PivotMember) => !nonEmpty || !allEmpty(result.values(m, total) ?? []);
+  const known = new Map<string, readonly PivotMember[]>();
+  const places = new Map<string, Map<string, number>>();
+  // The members of the parents' level, by their ids: a request may ask for the children of thousands.
+  const above = new Map<string, PivotMember>();
+  const collect = (member: PivotMember) => {
+    if (member.path.length === depth) above.set(upper.idOf(member.path), member);
+    else member.children?.forEach(collect);
+  };
+  collect(result.rows);
+  const childrenOf = (parent: readonly unknown[]): readonly PivotMember[] => {
+    const id = upper.idOf(parent);
+    let children = known.get(id);
+    if (!children) {
+      children = (above.get(id)?.children ?? []).filter(shown);
+      if (sort) children = bySummary(children, (m) => (at ? result.values(m, at)?.[sort.measure] : undefined), dir);
+      known.set(id, children);
+    }
+    return children;
+  };
+  return {
+    under,
+    values: (m: PivotMember) => result.values(m, total),
+    childrenOf,
+    /** The place of a member among its parent's children; -1 where it is not one of them. */
+    placeOf(member: readonly unknown[]): number {
+      const parent = member.slice(0, depth);
+      const id = upper.idOf(parent);
+      let place = places.get(id);
+      if (!place) places.set(id, (place = new Map(childrenOf(parent).map((child, i) => [axis.idOf(child.path), i]))));
+      return place.get(axis.idOf(member)) ?? -1;
+    },
+    /** The members shown below one, on each level down to `below`: its children first. */
+    descendants(member: PivotMember): number[] {
+      if (tally) return tally(member.path, below);
+      const out = new Array<number>(below).fill(0);
+      let line = member.children ?? [];
+      for (let j = 0; j < below && line.length; j++) {
+        line = line.filter(shown);
+        out[j] = line.length;
+        line = line.flatMap((m) => m.children ?? []);
+      }
+      return out;
+    },
+  };
 }
 
 /** The numbers `loadPivotCounts` asks for, over rows in memory. */
@@ -230,12 +362,16 @@ export function readPivotMembers<T>(body: unknown, options: PivotMembersOptions<
       if (!slice || !Array.isArray(slice.members)) throw new TypeError('a slice of the answer is { total, members }');
       const parent = options.slices[i].parent;
       const members = slice.members.map((given): PivotSliceMember => {
-        const m = given as { key?: unknown; count?: unknown; values?: unknown; childCount?: unknown } | null;
+        const m = given as { key?: unknown; count?: unknown; values?: unknown; childCount?: unknown; descendants?: unknown } | null;
         if (!m || typeof m !== 'object') throw new TypeError('a member of the answer is { key, count, values }');
         const key = readKey(m.key ?? null, level, fields);
         const values = Array.isArray(m.values) ? m.values : [];
         const out: PivotSliceMember = { key, path: [...parent, key], count: Number(m.count ?? 0), values: measures.map((measure, k) => readValue(values[k] ?? null, measure)) };
         if (m.childCount !== undefined && m.childCount !== null) out.childCount = Number(m.childCount);
+        if (options.descendants) {
+          if (!Array.isArray(m.descendants)) throw new TypeError('a member of the answer has "descendants", a number per level asked for');
+          out.descendants = padded(m.descendants.map((n) => Number(n ?? 0)), options.descendants);
+        }
         return out;
       });
       return { parent, total: Number(slice.total ?? members.length), members };
@@ -264,6 +400,23 @@ export function readPivotCounts<T>(body: unknown, options: PivotCountsOptions<T>
     byId.set(axis.idOf(c.path.map((key, k) => readKey(key, options.levels[k], fields))), Number(c.count ?? 0));
   }
   return { childCount: (path) => byId.get(axis.idOf(path)) ?? 0 };
+}
+
+/**
+ * The blocks of a backend's answer (`{ blocks: [{ total, counts }] }`, one per parent asked, each block `depth + 1`
+ * numbers). Throws a `TypeError` for what is no such answer.
+ */
+export function readPivotBlocks<T>(body: unknown, options: PivotBlocksOptions<T>): PivotBlocksResult {
+  const blocks = (body as { blocks?: unknown } | null)?.blocks;
+  if (!Array.isArray(blocks) || blocks.length !== options.parents.length) throw new TypeError('a pivot blocks answer is { blocks: [{ total, counts }] }, one per parent asked');
+  return {
+    blocks: blocks.map((given, i) => {
+      const b = given as { total?: unknown; counts?: unknown } | null;
+      if (!b || !Array.isArray(b.counts) || !b.counts.every(Array.isArray)) throw new TypeError('a parent of the answer is { total, counts: [[number, …], …] }');
+      const counts = (b.counts as unknown[][]).map((block) => padded(block.map((n) => Number(n ?? 0)), options.depth + 1));
+      return { parent: options.parents[i], total: Number(b.total ?? counts.reduce((sum, block) => sum + block[0], 0)), counts };
+    }),
+  };
 }
 
 /**

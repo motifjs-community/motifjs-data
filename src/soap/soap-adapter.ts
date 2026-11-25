@@ -13,8 +13,16 @@ import type { HttpResponse } from '../http/http-response';
 import { requestParams } from '../http/request-params';
 import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
+import type { PivotBlocksOptions } from '../query/pivot-blocks-options';
+import type { PivotCellsOptions } from '../query/pivot-cells-options';
+import type { PivotCountsOptions } from '../query/pivot-counts-options';
+import type { PivotLoadOptions } from '../query/pivot-load-options';
+import type { PivotMembersOptions } from '../query/pivot-members-options';
 import { isObject } from '../query/values';
+import { defaultPivotBody, defaultPivotPartBody, defaultReadPivot, defaultReadPivotPart } from '../rest/rest-defaults';
+import type { RestPivotPartOptions } from '../rest/rest-pivot-part';
 import type { SoapAdapterOptions } from './soap-adapter-options';
+import type { SoapPivotKind, SoapPivotOptions } from './soap-pivot-operation';
 import { childNamed, SoapReader } from './soap-reader';
 import { escapeXml, SoapWriter } from './soap-writer';
 
@@ -50,6 +58,8 @@ export class SoapAdapter<T = Record<string, unknown>, K = unknown> extends HttpA
   protected backendCapabilities(): Capabilities {
     const ops = this.soap.operations;
     const handles = ops.load.handles ?? [];
+    const pivot = !!ops.pivot;
+    const pivotWindow = pivot && ops.pivot!.window !== false;
     return {
       filter: handles.includes('filter'),
       sort: handles.includes('sort'),
@@ -58,6 +68,9 @@ export class SoapAdapter<T = Record<string, unknown>, K = unknown> extends HttpA
       select: handles.includes('select'),
       group: handles.includes('group'),
       summary: handles.includes('summary'),
+      pivot,
+      pivotWindow,
+      pivotBlocks: pivotWindow && !!ops.pivot!.blocks,
       insert: !!(ops.insert || ops.save),
       update: !!(ops.update || ops.save),
       remove: !!(ops.remove || ops.save),
@@ -69,6 +82,40 @@ export class SoapAdapter<T = Record<string, unknown>, K = unknown> extends HttpA
     const result = await this.call('load', load, () => load.args?.(options) ?? {}, options);
     const read: { rows: unknown[]; total?: number } = load.read ? load.read(result, options) : { rows: listOf(result) };
     return Array.isArray(read?.rows) ? { ...read, rows: read.rows.map((row) => this.readRow(row)) } : (read as LoadResult<T>);
+  }
+
+  protected override loadPivotGroups(options: PivotLoadOptions<T>): Promise<unknown> {
+    return this.callPivot('whole', options);
+  }
+
+  protected override loadPivotMemberSlices(options: PivotMembersOptions<T>): Promise<unknown> {
+    return this.callPivot('members', options);
+  }
+
+  protected override loadPivotChildCounts(options: PivotCountsOptions<T>): Promise<unknown> {
+    return this.callPivot('counts', options);
+  }
+
+  protected override loadPivotCellGroups(options: PivotCellsOptions<T>): Promise<unknown> {
+    return this.callPivot('cells', options);
+  }
+
+  protected override loadPivotBlockCounts(options: PivotBlocksOptions<T>): Promise<unknown> {
+    return this.callPivot('blocks', options);
+  }
+
+  // One operation computes pivots whole and in parts: the REST bodies and answers as JSON text (see SoapPivotOperation).
+  private async callPivot(kind: SoapPivotKind, options: SoapPivotOptions<T>): Promise<unknown> {
+    const op = this.soap.operations.pivot!;
+    const body = () => JSON.stringify(kind === 'whole' ? defaultPivotBody(options as PivotLoadOptions<T>) : defaultPivotPartBody(kind, options as RestPivotPartOptions<T>));
+    const result = await this.call('load', op, () => op.args?.(kind, options) ?? { kind, body: body() }, options);
+    try {
+      if (op.read) return op.read(kind, result, options);
+      const answer = typeof result === 'string' ? JSON.parse(result) : result;
+      return kind === 'whole' ? defaultReadPivot(answer) : defaultReadPivotPart(kind, answer);
+    } catch (error) {
+      throw DataError.create('MJD104', { operation: 'load', details: result, cause: error }, (error as Error).message);
+    }
   }
 
   protected override async findRow(key: K, options: ByKeyOptions): Promise<T | undefined> {

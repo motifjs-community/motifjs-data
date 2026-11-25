@@ -9,6 +9,8 @@ import type { LoadOptions } from '../query/load-options';
 import type { LoadResult } from '../query/load-result';
 import type { FilterExpression } from '../query/filter-expression';
 import { pivotResult, queryPivot, readPivotGroup } from '../query/pivot';
+import type { PivotBlocksOptions } from '../query/pivot-blocks-options';
+import type { PivotBlocksResult } from '../query/pivot-blocks-result';
 import type { PivotCellsOptions } from '../query/pivot-cells-options';
 import type { PivotCellsResult } from '../query/pivot-cells-result';
 import type { PivotCountsOptions } from '../query/pivot-counts-options';
@@ -19,7 +21,7 @@ import type { PivotLoadResult } from '../query/pivot-load-result';
 import type { PivotMembersOptions } from '../query/pivot-members-options';
 import type { PivotMembersResult } from '../query/pivot-members-result';
 import { runningAsks, runningTotals } from '../query/pivot-running';
-import { pivotCells, pivotCellsResult, pivotCounts, pivotMembers, readPivotCounts, readPivotMembers } from '../query/pivot-window';
+import { pivotBlocks, pivotCells, pivotCellsResult, pivotCounts, pivotMembers, readPivotBlocks, readPivotCounts, readPivotMembers } from '../query/pivot-window';
 import type { RowGroup } from '../query/row-group';
 import type { AdapterEvents } from './adapter-events';
 import type { BatchResult } from './batch-result';
@@ -29,7 +31,7 @@ import type { Change } from './change';
 import type { DataAdapterOptions } from './data-adapter-options';
 import { splitLoad } from './load-split';
 import type { OperationOptions } from './operation-options';
-import { checkCellsOptions, checkCountsOptions, checkMembersOptions, checkPivotOptions, SUMMARY_TYPES } from './pivot-checks';
+import { checkBlocksOptions, checkCellsOptions, checkCountsOptions, checkMembersOptions, checkPivotOptions, SUMMARY_TYPES } from './pivot-checks';
 import type { PushedChange } from './pushed-change';
 import { RowKeys } from './row-keys';
 import type { SaveOutcome } from './save-outcome';
@@ -187,6 +189,7 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
       pivotMembers,
       (o) => this.loadPivotMemberSlices(o),
       (body, o) => readPivotMembers(body, o, this.fields),
+      (o) => !o.descendants || !!this.capabilities.pivotBlocks,
     );
   }
 
@@ -202,6 +205,22 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
       pivotCounts,
       (o) => this.loadPivotChildCounts(o),
       (body, o, ctx) => readPivotCounts(body, o, this.fields, ctx),
+    );
+  }
+
+  /**
+   * How many members stand below the children of members of a pivot axis, a block of children at a time (see
+   * `PivotBlocksOptions`): where a view places the lines of members open by default. Computed as `loadPivotMembers` is.
+   */
+  loadPivotBlocks(options: PivotBlocksOptions<T>): Promise<PivotBlocksResult> {
+    return this.pivotPart(
+      options,
+      checkBlocksOptions,
+      (o) => ({ rows: o.levels, columns: o.sortBySummary?.levels, measures: o.measures, keep: o.keep }),
+      pivotBlocks,
+      (o) => this.loadPivotBlockCounts(o),
+      (body, o) => readPivotBlocks(body, o),
+      () => !!this.capabilities.pivotBlocks,
     );
   }
 
@@ -438,6 +457,11 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
     return Promise.reject(DataError.create('MJD301', { operation: 'load' }, 'count pivot members'));
   }
 
+  /** For a backend with `capabilities.pivotWindow`: the blocks of the options, `{ blocks: [{ total, counts }] }` (see `PivotBlocksResult`). */
+  protected loadPivotBlockCounts(_options: PivotBlocksOptions<T>): Promise<unknown> {
+    return Promise.reject(DataError.create('MJD301', { operation: 'load' }, 'count pivot blocks'));
+  }
+
   /** For a backend with `capabilities.pivotWindow`: the groups of the crossings asked for (see `PivotGroup`). */
   protected loadPivotCellGroups(_options: PivotCellsOptions<T>): Promise<unknown> {
     return Promise.reject(DataError.create('MJD301', { operation: 'load' }, 'compute pivot cells'));
@@ -538,6 +562,7 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
     memory: (rows: readonly T[], o: O, ctx: EvaluateContext) => R,
     remote: (o: O) => Promise<unknown>,
     read: (body: unknown, o: O, ctx: EvaluateContext) => R,
+    backend: (o: O) => boolean = () => true,
   ): Promise<R> {
     let checked: O;
     try {
@@ -547,7 +572,7 @@ export abstract class DataAdapter<T = Record<string, unknown>, K = unknown> exte
       throw this.reportFailure(error, 'load');
     }
     const ctx = this.evaluateContext;
-    if (!this.capabilities.pivotWindow || !this.pivotRemotely(asked(checked))) {
+    if (!this.capabilities.pivotWindow || !backend(checked) || !this.pivotRemotely(asked(checked))) {
       const { filter, expand, params, signal } = checked;
       // `load` reports its own failure.
       const { rows } = await this.load({ filter, expand, params, signal });
