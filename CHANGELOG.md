@@ -8,6 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- `expression`: a small expression language for the conditions, values and texts an application computes from data,
+  the same in a page and on a server. `parse` reads an expression into its tree (plain JSON, `version: 1`, every node
+  with its place in the text) and `parseTemplate` a text with `{{ … }}` expressions in it; `check` gives the type of the
+  value and the problems against a schema of names and their types (`Schema`, `type`, `typeText`, `nullable`,
+  `joinTypes`; `expect` for the type the value is wanted as) and never throws; `evaluate` computes a tree with the
+  values of its names, and `run` and `render` read and compute an expression or a template at once. A value is a
+  number, a text, a boolean, a day (`Day`), a moment, a list, an object or `null`, and nothing is converted implicitly;
+  `?.` and `??` handle values that may be missing, and a short function is passed as an argument
+  (`filter(rows, r => r.total > 100)`).
+- `expression.functions`: 84 functions on texts, numbers, lists, objects, logic, days and moments; `if` and `coalesce`
+  evaluate only the arguments they need. The `functions` option adds an application's own, checked and described as
+  the library's are. `timeZone`, `culture` and `now` set the clock and the culture an expression is evaluated in, and
+  `formatDate` and `format` write days, moments and numbers by a pattern.
+- The problems of an expression carry a code, a place (`at: [start, end]`) and their parameters (`Problem`,
+  `ProblemCode`, `PROBLEM_TEXTS`, `problemText`). `check` returns them as values, `mayBeNull` as a warning and the
+  others as errors; reading stops at the first problem, and `evaluate`, `run` and `render` throw it as an
+  `ExpressionError`. `limits` (`DEFAULT_LIMITS`: steps, list and text lengths, depth) keeps an expression from running
+  away.
+- For an editor of expressions: `tokens` gives the pieces of a text with their kinds, `complete` the words that may be
+  written at an offset (the fields of the value before a dot, the names of the schema, the parameters of the short
+  functions around it, the functions and the words of the language), and `signatureAt` the call and the argument the
+  offset is in.
+- `jsonSchema`: values validated against a schema in a subset of JSON Schema (`JsonSchema`: `type`, `enum`, `const`, the
+  bounds of numbers and texts, `pattern`, `format` (`date`, `date-time`, `email`, `uri`), `properties`, `required` and
+  `items`; a key that starts with `x-` belongs to the application). `validate` tells whether a value fits and gives each
+  problem with its path (`SchemaProblem`, `SCHEMA_PROBLEM_TEXTS`, `schemaProblemText`); `check` lists the keys of a
+  schema that are not read or not valid, so that no rule is dropped silently; `defaults` gives the value a schema starts
+  with. `matchesFormat`, `typeOfValue` and `sameValue` are the parts they are built on.
 - `loadPivotBlocks` on every adapter and on `DataSource` (`PivotBlocksOptions`, `PivotBlocksResult`; in memory
   `pivotBlocks`, and `readPivotBlocks` for a backend's answer) counts the members below the children of members, a block
   of children at a time in the order `loadPivotMembers` gives them, and `descendants` of `loadPivotMembers` counts them
