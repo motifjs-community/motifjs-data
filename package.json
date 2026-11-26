@@ -1,6 +1,6 @@
 {
   "name": "@motifx-community/data",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "description": "A data layer with adapters for local arrays, REST, OData and WCF services",
   "keywords": [
     "motifjs",
